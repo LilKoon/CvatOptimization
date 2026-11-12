@@ -82,7 +82,8 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '4.8.0';
+const VERSION = '4.8.1';
+const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
 const FIT_SIZE_HINT = 'Dùng cho Smart Snap. Bật để đo lại chiều dài, rộng và cao từ cụm điểm. Tắt để giữ kích thước hiện tại.';
@@ -801,7 +802,7 @@ function getFrame() {
 
 function activeId() {
  const id = annotationState()?.annotations?.activatedStateID;
- return Number.isInteger(id) ? id : null;
+ return isObjectId(id) ? id : null;
 }
 
 function labelName(s) {
@@ -1051,13 +1052,29 @@ function intVal(id) {
  return Number.isInteger(n) ? n : NaN;
 }
 
+function isObjectId(value) {
+ return Number.isSafeInteger(value) && value >= 1;
+}
+
+function readObjectId(input) {
+ if (!input || (!input.value && !input.validity.badInput)) return null;
+ const value = input.valueAsNumber;
+ return /^\d+$/.test(input.value) && isObjectId(value) ? value : NaN;
+}
+
+function updateObjectIdValidity(input) {
+ input.setAttribute('aria-invalid', String(Number.isNaN(readObjectId(input))));
+}
+
 function isChecked(id) {
  return !!$(id)?.checked;
 }
 
 function setField(id, value) {
  const el = $(id);
- if (el) el.value = value;
+ if (!el) return;
+ el.value = value;
+ if (el.hasAttribute('data-object-id')) updateObjectIdValidity(el);
 }
 
 function cleanStatusText(raw) {
@@ -1181,13 +1198,15 @@ function allowAutoFrames(what) {
 }
 
 function resolveTargetId() {
- const typed = intVal('cqt-target-id');
- return Number.isInteger(typed) ? typed : activeId();
+ const typed = readObjectId($('cqt-target-id'));
+ return Number.isNaN(typed) ? null : (typed ?? activeId());
 }
 
 function requireTarget() {
  const id = resolveTargetId();
- if (!Number.isInteger(id)) return fail('Nhập Target Object ID hoặc chọn 1 object!');
+ if (!isObjectId(id)) {
+  return fail(Number.isNaN(readObjectId($('cqt-target-id'))) ? OBJECT_ID_ERROR : 'Nhập Target Object ID hoặc chọn 1 object!');
+ }
  if (!getJob()) return fail('Chưa kết nối CVAT Job!');
  return id;
 }
@@ -1702,11 +1721,11 @@ function parseReferenceBoxIds(value) {
  return value.trim().split(/[\s,;]+/)
   .filter((token) => /^#?\d+$/.test(token))
   .map((token) => Number(token.replace(/^#/, '')))
-  .filter(Number.isSafeInteger);
+  .filter(isObjectId);
 }
 
 function setReferenceBoxIds(ids) {
- const clean = [...new Set((ids || []).filter((x) => Number.isInteger(x) && x > 0))];
+ const clean = [...new Set((ids || []).filter(isObjectId))];
  const formatted = clean.join(', ');
  setField('cqt-ground-ref-ids', formatted);
  setField('cqt-fc-ground-anchor-ids', formatted);
@@ -2683,7 +2702,7 @@ async function fetchLWH(id, frame = getFrame()) {
   id = (!targetLocked && activeId() !== null) ? activeId() : resolveTargetId();
  }
  if (!Number.isInteger(id)) return fail('Chọn 1 object trên canvas hoặc nhập Target Object ID trước!');
- if (!targetLocked && intVal('cqt-target-id') !== id) {
+ if (!targetLocked && readObjectId($('cqt-target-id')) !== id) {
   lastSyncedObjId = id;
   setField('cqt-target-id', id);
  }
@@ -2717,7 +2736,7 @@ async function clampLWHInputs(id, lwh) {
 
 // scope: 'range' (dải Start–End) | 'track' (mọi keyframe của track) | 'frame' (chỉ frame hiện tại)
 async function applyLWH(scope) {
- if (!targetLocked && activeId() !== null && intVal('cqt-target-id') !== activeId()) {
+ if (!targetLocked && activeId() !== null && readObjectId($('cqt-target-id')) !== activeId()) {
   setField('cqt-target-id', activeId());
   lastSyncedObjId = activeId();
  }
@@ -2909,7 +2928,7 @@ async function stepObjectKeyframe(dir) {
 
 // Đặt keyframe cho Toàn bộ Track hoặc Dải được chọn (Alt+K / ⌥K) hoặc chỉ Frame hiện tại (Alt+Shift+K) — không gỡ keyframe
 async function setKeyframe(scopeOverride) {
- if (!targetLocked && activeId() !== null && intVal('cqt-target-id') !== activeId()) {
+ if (!targetLocked && activeId() !== null && readObjectId($('cqt-target-id')) !== activeId()) {
   setField('cqt-target-id', activeId());
   lastSyncedObjId = activeId();
  }
@@ -2926,7 +2945,7 @@ async function setKeyframe(scopeOverride) {
 
  const ids = selectedOrTarget();
  if (!ids.length) return fail('Chọn object trước!');
- if (!Number.isInteger(intVal('cqt-target-id'))) {
+ if (!Number.isInteger(readObjectId($('cqt-target-id')))) {
   setField('cqt-target-id', ids[0]);
   lastSyncedObjId = ids[0];
  }
@@ -3010,7 +3029,7 @@ async function setKeyframe(scopeOverride) {
 async function applyOutsideRange(fromFrame, toFrame, makeOutside = true, opts = {}) {
  const ids = opts.ids?.length ? opts.ids : selectedOrTarget();
  if (!ids.length) return fail('Chọn object trước!');
- if (!Number.isInteger(intVal('cqt-target-id'))) {
+ if (!Number.isInteger(readObjectId($('cqt-target-id')))) {
   setField('cqt-target-id', ids[0]);
   lastSyncedObjId = ids[0];
  }
@@ -3569,7 +3588,7 @@ function selectedOrTarget() {
 async function outsideSelected(forceOutside = null) {
  const ids = selectedOrTarget();
  if (!ids.length) return fail('Chọn object hoặc nhóm box (Shift/Cmd + Click) trước!');
- if (!Number.isInteger(intVal('cqt-target-id'))) {
+ if (!Number.isInteger(readObjectId($('cqt-target-id')))) {
   setField('cqt-target-id', ids[0]);
   lastSyncedObjId = ids[0];
  }
@@ -3783,7 +3802,7 @@ async function shiftTrack() {
 }
 
 async function rotateTrack(angleDeg) {
- if (!targetLocked && activeId() !== null && intVal('cqt-target-id') !== activeId()) {
+ if (!targetLocked && activeId() !== null && readObjectId($('cqt-target-id')) !== activeId()) {
   setField('cqt-target-id', activeId());
   lastSyncedObjId = activeId();
  }
@@ -3805,7 +3824,7 @@ async function rotateTrack(angleDeg) {
  // 2. Lấy danh sách Object đang chọn trên Canvas hoặc Target ID
  const ids = selectedOrTarget();
  if (!ids.length) return fail('Chọn object trước!');
- if (!Number.isInteger(intVal('cqt-target-id'))) {
+ if (!Number.isInteger(readObjectId($('cqt-target-id')))) {
   setField('cqt-target-id', ids[0]);
   lastSyncedObjId = ids[0];
  }
@@ -7049,7 +7068,7 @@ function installGlobalHandlers() {
       !getSettings().autoSyncObject) return;
   const card = e.target.closest?.('.cvat-objects-sidebar-state-item');
   const frame = getFrame();
-  const previous = intVal('cqt-target-id');
+  const previous = readObjectId($('cqt-target-id'));
   let id;
   if (card && !e.target.closest('a, button, input, label, select, textarea, [role="button"]')) {
    id = Number(card.id.match(/^cvat-objects-sidebar-state-item-(\d+)$/)?.[1]);
@@ -7057,7 +7076,7 @@ function installGlobalHandlers() {
    const mode = annotationState()?.canvas?.instance?.mode?.();
    if (mode && mode !== 'idle') return;
    id = await findCuboidUnderPointer(e.clientX, e.clientY);
-   if (frame !== getFrame() || !Object.is(previous, intVal('cqt-target-id')) || targetLocked) return;
+   if (frame !== getFrame() || !Object.is(previous, readObjectId($('cqt-target-id'))) || targetLocked) return;
   }
   if (!Number.isInteger(id)) return;
   setField('cqt-target-id', id);
@@ -7684,9 +7703,10 @@ function fcComputeExtent() {
  fc.extent = { l: pick(6, 4.5), w: pick(7, 1.9), h: pick(8, 1.6) };
 }
 
-async function fcLoadTrack(id = intVal('cqt-fc-target')) {
- if (!Number.isInteger(id)) id = resolveTargetId();
- if (!Number.isInteger(id)) return fail('Nhập Object ID hoặc chọn 1 object trên canvas.');
+async function fcLoadTrack(id = readObjectId($('cqt-fc-target'))) {
+ if (id !== null && !isObjectId(id)) return fail(OBJECT_ID_ERROR);
+ id ??= resolveTargetId();
+ if (!isObjectId(id)) return fail('Nhập Object ID hoặc chọn 1 object trên canvas.');
  const b = jobBounds();
  if (!b) return fail('Không đọc được dải frame của job.');
  if (fc.harvesting) {
@@ -9703,7 +9723,7 @@ const FC_HTML = `
   </div>
   <div class="cqt-fc-head-tools">
    <span class="cqt-label">Object</span>
-   <input type="number" id="cqt-fc-target" class="cqt-input" placeholder="ID" />
+   <input type="number" id="cqt-fc-target" class="cqt-input" placeholder="ID" min="1" step="1" inputmode="numeric" data-object-id aria-label="Object ID" />
    <button id="cqt-fc-pick" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Lấy object đang chọn trên canvas rồi nạp track">Lấy đang chọn</button>
    <button id="cqt-fc-load" class="cqt-btn cqt-btn-primary cqt-sm cqt-none" title="Đọc mọi frame của object và quét point cloud (Enter)">Nạp Track</button>
    <button id="cqt-fc-rescan" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xoá cache và quét lại point cloud mọi frame">${ICONS.refresh}<span>Quét lại Cloud</span></button>
@@ -9749,7 +9769,7 @@ const FC_HTML = `
  <details class="cqt-fc-disclosure">
  <summary>Hiển thị và điều khiển</summary>
  <div class="cqt-fc-bar">
-  <label class="cqt-fc-ctl" title="Chiều cao mỗi hàng frame">Cỡ hàng <input type="range" id="cqt-fc-rowh" min="100" max="360" step="10" /></label>
+  <label class="cqt-fc-ctl" title="Chiều cao ưu tiên của khung trong mỗi frame">Cỡ hàng <input type="range" id="cqt-fc-rowh" min="100" max="360" step="10" /></label>
   <label class="cqt-fc-ctl" title="Phóng to hình chiếu (hoặc Alt/Ctrl + lăn chuột trên danh sách)">Zoom <input type="range" id="cqt-fc-zoom" min="0.5" max="4" step="0.1" /><span id="cqt-fc-zoom-val" class="cqt-label"></span></label>
   <span class="cqt-fc-sep"></span>
   <label class="cqt-fc-ctl" title="Giới hạn độ sâu đám mây điểm quanh box để loại bỏ xe/cây ở làn bên cạnh đè vào hình chiếu Side / Front">Lọc điểm
@@ -10010,6 +10030,7 @@ function fcBindWindow(el) {
   return fcLoadTrack(id);
  });
  on('cqt-fc-load', () => fcLoadTrack());
+ on('cqt-fc-target', (e) => updateObjectIdValidity(e.target), 'input');
  on('cqt-fc-target', (e) => (e.key === 'Enter' ? fcLoadTrack() : null), 'keydown');
  on('cqt-fc-rescan', () => fcHarvest(true));
  on('cqt-fc-safedata', () => setSafeData(!safeData()));
@@ -12292,7 +12313,7 @@ ${ICONS.redo}
 <div class="cqt-row" style="justify-content:space-between;">
 <div class="cqt-row" style="gap:4px;">
 <span class="cqt-label" style="font-weight:600; color:var(--cqt-text);">Target</span>
-<input type="number" id="cqt-target-id" class="cqt-input" placeholder="ID" style="width:54px; height:24px; padding:2px 5px; font-weight:600;" title="Nhập ID object hoặc chọn trên canvas" />
+<input type="number" id="cqt-target-id" class="cqt-input" placeholder="ID" min="1" step="1" inputmode="numeric" data-object-id aria-label="Target Object ID" style="width:54px; height:24px; padding:2px 5px; font-weight:600;" title="Nhập ID object hoặc chọn trên canvas" />
 <button id="cqt-btn-lock-target" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" title="Khoá Target ID hiện tại (không tự đổi khi click sang box khác)">
 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
 </button>
@@ -13141,8 +13162,10 @@ function bindActions(wrapper) {
    await handleHealthAction(target.dataset.act, target, tbHealth);
   }));
  }
- on("cqt-target-id", async () => {
-  const id = intVal("cqt-target-id");
+ on("cqt-target-id", (e) => updateObjectIdValidity(e.target), "input");
+ on("cqt-target-id", async (e) => {
+  const id = readObjectId(e.target);
+  if (Number.isNaN(id)) return fail(OBJECT_ID_ERROR);
   if (Number.isInteger(id)) {
    lastSyncedObjId = id;
    lastSyncedFrame = getFrame();
