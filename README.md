@@ -40,7 +40,7 @@ Docker dùng các image backend v2.76.0 trong Compose. Xem thêm [hướng dẫn
 ### Mở Toolbox
 
 1. Mở [CVAT trên localhost](http://localhost:8080) hoặc địa chỉ CVAT của stack đang dùng.
-2. Vào một job 3D và bấm **Cuboid Toolbox** cạnh thanh frame. Nếu Tampermonkey đang bật bản userscript cũ cho cùng địa chỉ, hãy tắt bản đó để tránh nhận phím hai lần.
+2. Vào một job 3D và bấm **icon khối lập phương** ở mép trái vùng 3D để mở Cuboid Toolbox. Bạn có thể kéo icon sang vị trí khác hoặc dùng `Option+Q` / `Alt+Q`. Nếu Tampermonkey đang bật bản userscript cũ cho cùng địa chỉ, hãy tắt bản đó để tránh nhận phím hai lần.
 3. Dùng tay nắm sáu chấm để đặt HUD trạng thái và bảng Item XYZ/LWH. HUD trạng thái có thể phủ lên Item và các nút bố cục 3D khi mở rộng.
 
 `Option/Alt+Q` mở Toolbox, `Option/Alt+T` mở Full Control và `Option/Alt+W` mở QA/QC. Bảng phím tắt nằm trong **Cài đặt → Phím tắt Toolbox**.
