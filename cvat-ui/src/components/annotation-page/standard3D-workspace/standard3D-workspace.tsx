@@ -6,6 +6,8 @@
 import React from 'react';
 import Layout from 'antd/lib/layout';
 
+import CuboidToolbox from './cuboid-toolbox';
+
 import { DimensionType } from 'cvat-core-wrapper';
 import ControlsSideBarContainer from 'containers/annotation-page/standard3D-workspace/controls-side-bar/controls-side-bar';
 import ObjectSideBarComponent from 'components/annotation-page/standard-workspace/objects-side-bar/objects-side-bar';
@@ -21,6 +23,7 @@ export default function StandardWorkspace3DComponent(): JSX.Element {
         <Layout hasSider className='cvat-standard-workspace'>
             <ControlsSideBarContainer />
             <CanvasLayout type={DimensionType.DIMENSION_3D} />
+            <CuboidToolbox />
             <ObjectSideBarComponent objectsList={<ObjectsListContainer />} />
             <PropagateConfirmComponent />
             <CanvasContextMenuContainer />

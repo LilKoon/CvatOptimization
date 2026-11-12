@@ -22,6 +22,7 @@ import { disposeScene } from './utils';
 
 export interface Canvas3dView {
     html(): ViewsDOM;
+    getToolboxViews(): Readonly<Views>;
     render(): void;
     keyControls(keys: KeyboardEvent): void;
     focusObjectByClientId(clientID: number, animate?: boolean): void;
@@ -2499,6 +2500,10 @@ export class Canvas3dViewImpl implements Canvas3dView, Listener {
             this.views.side.controls.enabled = false;
             this.views.front.controls.enabled = false;
         }
+    }
+
+    public getToolboxViews(): Readonly<Views> {
+        return this.views;
     }
 
     public keyControls(key: any): void {

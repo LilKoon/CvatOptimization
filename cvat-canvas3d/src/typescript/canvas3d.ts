@@ -17,12 +17,13 @@ import {
     MergeData,
 } from './canvas3dModel';
 import {
-    Canvas3dView, Canvas3dViewImpl, ViewsDOM, CameraAction,
+    Canvas3dView, Canvas3dViewImpl, ViewsDOM, Views, CameraAction,
 } from './canvas3dView';
 import { Master } from './master';
 
 interface Canvas3d {
     html(): ViewsDOM;
+    getToolboxViews(): Readonly<Views>;
     setup(frameData: any, objectStates: any[]): void;
     isAbleToChangeFrame(): boolean;
     mode(): Mode;
@@ -55,6 +56,10 @@ class Canvas3dImpl implements Canvas3d {
 
     public html(): ViewsDOM {
         return this.view.html();
+    }
+
+    public getToolboxViews(): Readonly<Views> {
+        return this.view.getToolboxViews();
     }
 
     public keyControls(keys: KeyboardEvent): void {
