@@ -69,7 +69,6 @@ export default function mountCuboidToolbox({
  root.id = 'cvat-cuboid-toolbox';
  document.body.appendChild(root);
  const toolbar = document.getElementById('cvat-cuboid-toolbar');
- let launcher;
  let projectionButton;
  let lastViews = null;
  let disposing = false;
@@ -1033,7 +1032,6 @@ function findDrawnMesh(id) {
 // Ô nhập, trạng thái, log
 // =========================================================================
 function $(id) {
- if (id === 'cvat-quicktool-handle' && launcher) return launcher;
  return root.querySelector(`#${CSS.escape(id)}`);
 }
 
@@ -6898,7 +6896,7 @@ function onKeyDown(e) {
   }
   return;
  }
- if (['Enter', ' '].includes(e.key) && (e.target === launcher || e.target === $('cqt-sidebar-rail'))) {
+ if (['Enter', ' '].includes(e.key) && e.target === $('cqt-sidebar-rail')) {
   swallow(e);
   if (!e.repeat) e.target.click();
   return;
@@ -7606,7 +7604,7 @@ async function fcToggleTools() {
   if (Number.isInteger(frame) && !(await goToFrame(frame))) return fail(`Không mở được frame ${frame}.`);
   if (!fc.open) return;
   await jumpTo(fc.targetId, frame);
-  fc.previousSidebarState = panelApi?.getState() || 'closed';
+  fc.previousSidebarState = panelApi?.getState() || 'collapsed';
   fc.toolsOpen = true;
   root.classList.add('cqt-fc-tools-open');
   panelApi?.setState('pinned');
@@ -11792,9 +11790,6 @@ const STYLES = `
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-item-panel,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-health-pill { --cqt-bg: #ffffff; --cqt-bg-bar: #f4f4f5; --cqt-bg-card: #f8fafc; --cqt-bg-elev: #f1f5f9; --cqt-bg-hover: #e4e4e7; --cqt-bg-input: #ffffff; --cqt-bg-view: #f8fafc; --cqt-border: #d4d4d8; --cqt-border-btn: #a1a1aa; --cqt-border-strong: #52525b; --cqt-border-subtle: #e4e4e7; --cqt-text: #09090b; --cqt-text-sec: #18181b; --cqt-text-muted: #52525b; --cqt-text-dim: #71717a; --cqt-pri-bg: #18181b; --cqt-pri-fg: #ffffff; --cqt-pri-hover: #27272a; --cqt-pri-kbd-bg: rgba(255,255,255,0.16); --cqt-pri-kbd-bd: rgba(255,255,255,0.32); --cqt-row-sel: rgba(24,24,27,0.055); --cqt-shadow: -10px 10px 28px rgba(15,23,42,0.16), 0 0 0 1px rgba(15,23,42,0.08); --cqt-fc-shadow: 0 20px 54px rgba(15,23,42,0.22), 0 0 0 1px rgba(15,23,42,0.1); }
 #cvat-quicktool-wrapper { position: fixed; top: 80px; right: 0; z-index: 999999; display: flex; align-items: flex-start; transform: translateX(356px); transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1); font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: var(--cqt-text); user-select: none; -webkit-font-smoothing: antialiased; }
-#cvat-quicktool-handle { width: 24px; background: var(--cqt-bg); color: var(--cqt-text-muted); padding: 14px 4px; border: 1px solid var(--cqt-border-btn); border-right: none; border-radius: 6px 0 0 6px; cursor: pointer; font-weight: 600; font-size: 10.5px; letter-spacing: 0.8px; box-shadow: -4px 4px 16px rgba(0,0,0,0.35); writing-mode: vertical-rl; transition: color 0.15s, background 0.15s, border-color 0.15s; }
-#cvat-quicktool-handle:hover { background: var(--cqt-bg-elev); color: var(--cqt-text); border-color: var(--cqt-border-strong); }
-#cvat-quicktool-handle[aria-expanded="true"] { background: var(--cqt-bg-elev); color: var(--cqt-text); border-color: var(--cqt-border-strong); }
 #cvat-quicktool-panel { width: 356px; background: var(--cqt-bg); color: var(--cqt-text); border: 1px solid var(--cqt-border); border-right: none; border-radius: 8px 0 0 8px; box-shadow: var(--cqt-shadow); overflow: hidden; display: flex; flex-direction: column; max-height: 91vh; }
 #cvat-quicktool-header { padding: 8px 10px; background: var(--cqt-bg); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--cqt-border); cursor: move; }
 #cvat-quicktool-header .title { font-weight: 600; color: var(--cqt-text); display: flex; align-items: center; gap: 6px; font-size: 12px; letter-spacing: -0.01em; }
@@ -12133,8 +12128,7 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 6px 9px 8px; display: f
 `;
 
 const PANEL_HTML = `
-<button type="button" id="cvat-quicktool-handle" aria-expanded="false" aria-controls="cvat-quicktool-panel" title="Mở hoặc thu gọn Toolbox (${OPTION_KEY}Q)">Cuboid Toolbox</button>
-<button type="button" id="cqt-sidebar-rail" aria-label="Mở lại Cuboid Toolbox" title="Bấm để mở Toolbox · Kéo để di chuyển" aria-controls="cvat-quicktool-panel" aria-expanded="false" hidden>${ICONS.cuboid}</button>
+<button type="button" id="cqt-sidebar-rail" aria-label="Mở Cuboid Toolbox" title="Bấm để mở Toolbox (${OPTION_KEY}Q) · Kéo để di chuyển" aria-controls="cvat-quicktool-panel" aria-expanded="false">${ICONS.cuboid}</button>
 <section id="cvat-quicktool-panel" aria-label="Cuboid Toolbox" inert>
 <div id="cvat-quicktool-header">
 <div class="title">
@@ -12164,10 +12158,7 @@ ${ICONS.redo}
 <button id="cqt-btn-pin" aria-label="Ghim Toolbox" aria-pressed="false" title="Ghim Toolbox để giữ mở khi rời chuột">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg>
 </button>
-<button id="cqt-btn-minimize" type="button" aria-label="Thu gọn Toolbox" title="Thu gọn Toolbox thành icon">
-<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M5 12h14"/></svg>
-</button>
-<button id="cqt-btn-close" aria-label="Đóng Toolbox" title="Đóng Toolbox và ẩn icon">
+<button id="cqt-btn-close" type="button" aria-label="Thu gọn Toolbox" title="Thu gọn Toolbox thành icon">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
 </button>
 </div>
@@ -12756,7 +12747,7 @@ function toggleStealthUI() {
  root.classList.toggle("cqt-stealth-ui", stealthUI);
  syncDockSettingsUI();
  if (stealthUI) {
-  panelApi?.setState('closed');
+  panelApi?.setState('collapsed');
   if (fc.open) closeFullControl();
   dockLayout();
   setStatus(`Đã ẩn toàn bộ giao diện Tool — phím tắt vẫn hoạt động (${KEY_PREFIX}⇧Q hoặc ${KEY_PREFIX}\\ để hiện lại).`, "info");
@@ -12812,7 +12803,7 @@ function createUI() {
  }
  const wrapper = document.createElement("div");
  wrapper.id = "cvat-quicktool-wrapper";
- wrapper.dataset.sidebarState = "closed";
+ wrapper.dataset.sidebarState = 'collapsed';
  wrapper.innerHTML = PANEL_HTML;
  root.appendChild(wrapper);
 
@@ -12856,9 +12847,7 @@ function createUI() {
 
 function bindPanel(wrapper) {
  const pinBtn = wrapper.querySelector("#cqt-btn-pin");
- launcher = wrapper.querySelector("#cvat-quicktool-handle");
  if (toolbar) {
-  toolbar.appendChild(launcher);
   projectionButton = document.createElement('button');
   projectionButton.type = 'button';
   projectionButton.className = 'cqt-player-projection';
@@ -12892,7 +12881,6 @@ function bindPanel(wrapper) {
   const focus = document.activeElement;
   wrapper.dataset.sidebarState = state;
   wrapper.classList.toggle('is-open', open);
-  launcher.setAttribute('aria-expanded', String(open));
   rail.hidden = state !== 'collapsed';
   pinBtn.setAttribute('aria-pressed', String(pinned));
   pinBtn.setAttribute('aria-label', pinned ? 'Bỏ ghim Toolbox' : 'Ghim Toolbox');
@@ -12900,7 +12888,7 @@ function bindPanel(wrapper) {
   pinBtn.classList.toggle('active', pinned);
   panel.inert = !open;
   if (!open && (panel.contains(focus) || focus === rail)) {
-   const fallback = fc.open ? $('cqt-fc-tools') : (state === 'collapsed' ? rail : launcher);
+   const fallback = fc.open ? $('cqt-fc-tools') : (stealthUI ? projectionButton : rail);
    fallback?.focus({ preventScroll: true });
   }
   if (!open) {
@@ -12946,7 +12934,7 @@ function bindPanel(wrapper) {
   if (getState() === 'peek' && !panel.contains(e.relatedTarget)) queueCollapse();
  });
  listen(document, 'pointerdown', (e) => {
-  if (getState() === 'peek' && !wrapper.contains(e.target) && !launcher.contains(e.target)) {
+  if (getState() === 'peek' && !wrapper.contains(e.target)) {
    setState('collapsed');
   }
  }, true);
@@ -12957,7 +12945,7 @@ function bindPanel(wrapper) {
  panel.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !isTyping(e)) {
    swallow(e);
-   setState('closed');
+   setState('collapsed');
   }
  });
  for (const type of ["pointerdown", "pointermove", "pointerover", "pointerout", "mousedown", "mousemove",
@@ -12965,9 +12953,7 @@ function bindPanel(wrapper) {
   wrapper.addEventListener(type, (e) => e.stopPropagation());
  }
  pinBtn.addEventListener('click', () => setState(getState() === 'pinned' ? 'peek' : 'pinned'));
- wrapper.querySelector('#cqt-btn-minimize').addEventListener('click', () => setState('collapsed'));
- wrapper.querySelector('#cqt-btn-close').addEventListener('click', () => setState('closed'));
- launcher.addEventListener("click", togglePanel);
+ wrapper.querySelector('#cqt-btn-close').addEventListener('click', () => setState('collapsed'));
 
  wrapper.querySelectorAll(".cqt-tab").forEach((tab) => {
   tab.addEventListener("click", () => {
@@ -13272,7 +13258,6 @@ function dispose() {
   fc.observer?.disconnect();
   fc.resizeObserver?.disconnect();
   dock.observer?.disconnect();
-  if (toolbar?.contains(launcher)) launcher.remove();
   projectionButton?.remove();
   root.remove();
   lastViews = null;
