@@ -12,6 +12,11 @@
     pointer-events: none;
 }
 
+#cvat-cuboid-toolbox #cvat-quicktool-wrapper[data-sidebar-state="collapsed"] {
+    width: 30px;
+    max-height: none;
+}
+
 #cvat-cuboid-toolbox #cvat-quicktool-handle {
     width: auto;
     flex: 0 0 auto;
@@ -39,11 +44,13 @@
 
 #cvat-cuboid-toolbox #cvat-quicktool-wrapper.is-open #cvat-quicktool-panel {
     display: flex;
+    animation: cqt-toolbox-reveal 140ms ease-out;
 }
 
 #cvat-cuboid-toolbox #cqt-sidebar-rail:not([hidden]) {
     display: grid;
     place-items: center;
+    box-sizing: border-box;
     width: 30px;
     height: 30px;
     padding: 0;
@@ -51,8 +58,31 @@
     background: var(--cqt-bg-elev);
     border: 1px solid var(--cqt-border-btn);
     border-radius: 6px;
-    cursor: pointer;
+    cursor: grab;
+    touch-action: none;
     pointer-events: auto;
+    animation: cqt-toolbox-reveal 120ms ease-out;
+}
+
+#cvat-cuboid-toolbox #cqt-sidebar-rail:hover {
+    background: var(--cqt-bg-hover);
+    border-color: var(--cqt-border-strong);
+}
+
+#cvat-cuboid-toolbox #cqt-sidebar-rail:active {
+    cursor: grabbing;
+}
+
+@keyframes cqt-toolbox-reveal {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #cvat-cuboid-toolbox #cvat-quicktool-wrapper.is-open #cvat-quicktool-panel,
+    #cvat-cuboid-toolbox #cqt-sidebar-rail:not([hidden]) {
+        animation: none;
+    }
 }
 
 #cvat-cuboid-toolbox #cqt-sidebar-rail .cqt-svg {

@@ -2575,7 +2575,6 @@ async function fetchLWHQuiet(id, frame) {
 }
 
 let syncBusy = false;
-let pointerInTool = false;
 
 async function syncActiveObjectQuiet() {
  if (syncBusy || isToolBusy() || !$('cvat-quicktool-wrapper')) return;
@@ -10461,12 +10460,21 @@ function placeFloatingHud(el, x, y) {
  return { x: left, y: top };
 }
 
-function placeToolboxPanel(el, x, y) {
- const left = Math.round(clamp(x, 8, Math.max(8, window.innerWidth - el.offsetWidth - 8)));
- const top = Math.round(clamp(y, 8, Math.max(8, window.innerHeight - 180)));
+function placeToolboxPanel(el, x, y, snapDistance = 0) {
+ const compact = el.dataset.sidebarState === 'collapsed';
+ const margin = compact ? 0 : 8;
+ const height = compact ? el.offsetHeight : Math.min(320, window.innerHeight - 16);
+ const right = Math.max(margin, window.innerWidth - el.offsetWidth - margin);
+ const bottom = Math.max(margin, window.innerHeight - height - margin);
+ let left = Math.round(clamp(x, margin, right));
+ let top = Math.round(clamp(y, margin, bottom));
+ const edgeX = compact ? (left <= snapDistance ? 'left' : right - left <= snapDistance ? 'right' : undefined) : undefined;
+ const edgeY = compact ? (top <= snapDistance ? 'top' : bottom - top <= snapDistance ? 'bottom' : undefined) : undefined;
+ if (edgeX) left = edgeX === 'left' ? 0 : right;
+ if (edgeY) top = edgeY === 'top' ? 0 : bottom;
  el.style.left = `${left}px`;
  el.style.setProperty('--cqt-sidebar-top', `${top}px`);
- return { x: left, y: top };
+ return { x: left, y: top, edgeX, edgeY };
 }
 
 function placeHealthHud(el, x, y) {
@@ -10482,11 +10490,12 @@ function placeHealthHud(el, x, y) {
  return position;
 }
 
-function bindHudGrip(hud, key, place = placeFloatingHud) {
- const grip = hud.el.querySelector('.cqt-hud-grip');
+function bindHudGrip(hud, key, place = placeFloatingHud, { grip = hud.el.querySelector('.cqt-hud-grip'), settle } = {}) {
  let drag = null;
+ let suppressClick = false;
  grip.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || !event.isPrimary) return;
+  suppressClick = false;
   event.preventDefault();
   event.stopPropagation();
   grip.setPointerCapture(event.pointerId);
@@ -10508,9 +10517,16 @@ function bindHudGrip(hud, key, place = placeFloatingHud) {
  });
  grip.addEventListener('pointerup', (event) => {
   if (!drag || event.pointerId !== drag.pointerId) return;
-  if (drag.moved) lsSet(key, hud.position);
+  if (drag.moved) {
+   suppressClick = true;
+   if (settle) hud.position = settle(hud.el, hud.position.x, hud.position.y);
+   lsSet(key, hud.position);
+  }
   drag = null;
  });
+ grip.addEventListener('click', (event) => {
+  if (suppressClick && event.detail > 0) swallow(event);
+ }, true);
  grip.addEventListener('lostpointercapture', (event) => {
   if (!drag || event.pointerId !== drag.pointerId) return;
   hud.position = drag.previous;
@@ -12118,7 +12134,7 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 6px 9px 8px; display: f
 
 const PANEL_HTML = `
 <button type="button" id="cvat-quicktool-handle" aria-expanded="false" aria-controls="cvat-quicktool-panel" title="Mở hoặc thu gọn Toolbox (${OPTION_KEY}Q)">Cuboid Toolbox</button>
-<button type="button" id="cqt-sidebar-rail" aria-label="Mở lại Cuboid Toolbox" title="Mở lại Cuboid Toolbox" aria-controls="cvat-quicktool-panel" aria-expanded="false" hidden>${ICONS.cuboid}</button>
+<button type="button" id="cqt-sidebar-rail" aria-label="Mở lại Cuboid Toolbox" title="Bấm để mở Toolbox · Kéo để di chuyển" aria-controls="cvat-quicktool-panel" aria-expanded="false" hidden>${ICONS.cuboid}</button>
 <section id="cvat-quicktool-panel" aria-label="Cuboid Toolbox" inert>
 <div id="cvat-quicktool-header">
 <div class="title">
@@ -12148,7 +12164,10 @@ ${ICONS.redo}
 <button id="cqt-btn-pin" aria-label="Ghim Toolbox" aria-pressed="false" title="Ghim Toolbox để giữ mở khi rời chuột">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg>
 </button>
-<button id="cqt-btn-close" aria-label="Đóng Toolbox" title="Đóng Toolbox và ẩn tab sát viền">
+<button id="cqt-btn-minimize" type="button" aria-label="Thu gọn Toolbox" title="Thu gọn Toolbox thành icon">
+<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M5 12h14"/></svg>
+</button>
+<button id="cqt-btn-close" aria-label="Đóng Toolbox" title="Đóng Toolbox và ẩn icon">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
 </button>
 </div>
@@ -12737,7 +12756,6 @@ function toggleStealthUI() {
  root.classList.toggle("cqt-stealth-ui", stealthUI);
  syncDockSettingsUI();
  if (stealthUI) {
-  pointerInTool = false;
   panelApi?.setState('closed');
   if (fc.open) closeFullControl();
   dockLayout();
@@ -12856,6 +12874,10 @@ function bindPanel(wrapper) {
   root.classList.remove('cqt-fc-tools-docked');
   return placeToolboxPanel(el, x, y);
  });
+ bindHudGrip(placement, LS.toolboxPos, placeToolboxPanel, {
+  grip: rail,
+  settle: (el, x, y) => placeToolboxPanel(el, x, y, 20),
+ });
  wrapper.querySelector('.cqt-toolbox-grip').addEventListener('dblclick', () => {
   placement.position = null;
   lsSet(LS.toolboxPos, null);
@@ -12867,10 +12889,7 @@ function bindPanel(wrapper) {
   clearTimeout(collapseTimer);
   const open = state === 'peek' || state === 'pinned';
   const pinned = state === 'pinned';
-  if (state === 'closed' && (panel.contains(document.activeElement) || document.activeElement === rail)) {
-   const fallback = fc.open ? $('cqt-fc-tools') : launcher;
-   fallback?.focus({ preventScroll: true });
-  }
+  const focus = document.activeElement;
   wrapper.dataset.sidebarState = state;
   wrapper.classList.toggle('is-open', open);
   launcher.setAttribute('aria-expanded', String(open));
@@ -12880,8 +12899,11 @@ function bindPanel(wrapper) {
   pinBtn.title = pinned ? 'Bỏ ghim để tự thu khi rời chuột' : 'Ghim Toolbox để giữ mở khi rời chuột';
   pinBtn.classList.toggle('active', pinned);
   panel.inert = !open;
+  if (!open && (panel.contains(focus) || focus === rail)) {
+   const fallback = fc.open ? $('cqt-fc-tools') : (state === 'collapsed' ? rail : launcher);
+   fallback?.focus({ preventScroll: true });
+  }
   if (!open) {
-   pointerInTool = false;
    if (fc.toolsOpen) {
     fc.toolsOpen = false;
     root.classList.remove('cqt-fc-tools-open');
@@ -12891,50 +12913,46 @@ function bindPanel(wrapper) {
   dockLayout();
   return open;
  };
- const queueCollapse = (delay) => {
+ const queueCollapse = () => {
   clearTimeout(collapseTimer);
   collapseTimer = setTimeout(() => {
-   if (getState() !== 'peek' || pointerInTool) return;
+   if (getState() !== 'peek' || panel.matches(':hover')) return;
    const focus = document.activeElement;
    if (panel.contains(focus) && focus.matches('input, textarea, select, :focus-visible')) return;
    setState('collapsed');
-  }, delay);
- };
- const peek = () => {
-  setState('peek');
-  queueCollapse(1400);
-  return true;
+  }, 260);
  };
  panelApi = {
   getState,
   setState,
   layout(rect) {
-   const x = fc.toolsOpen ? 8 : (rect?.left ?? 0) + 8;
-   const y = fc.toolsOpen ? 8 : (rect?.top ?? 98) + 8;
-   root.classList.toggle('cqt-fc-tools-docked', fc.toolsOpen && !placement.position);
-   placeToolboxPanel(wrapper, placement.position?.x ?? x, placement.position?.y ?? y);
+   const position = placement.position;
+   let x = position?.x ?? (fc.toolsOpen ? 8 : (rect?.left ?? 0) + 8);
+   let y = position?.y ?? (fc.toolsOpen ? 8 : (rect?.top ?? 98) + 8);
+   if (position?.edgeX) x = position.edgeX === 'right' ? window.innerWidth : 0;
+   if (position?.edgeY) y = position.edgeY === 'bottom' ? window.innerHeight : 0;
+   root.classList.toggle('cqt-fc-tools-docked', fc.toolsOpen && !position);
+   placeToolboxPanel(wrapper, x, y);
   },
   toggle() {
-   return getState() === 'peek' || getState() === 'pinned' ? setState('closed') : peek();
+   return setState(wrapper.classList.contains('is-open') ? 'collapsed' : 'peek');
   },
  };
- wrapper.addEventListener('pointerenter', () => {
-  pointerInTool = true;
-  clearTimeout(collapseTimer);
+ panel.addEventListener('pointerenter', () => clearTimeout(collapseTimer));
+ panel.addEventListener('pointerleave', (e) => {
+  if (getState() === 'peek' && e.pointerType !== 'touch') queueCollapse();
  });
- wrapper.addEventListener('pointerleave', () => {
-  pointerInTool = false;
-  if (getState() === 'peek') queueCollapse(260);
+ panel.addEventListener('focusout', (e) => {
+  if (getState() === 'peek' && !panel.contains(e.relatedTarget)) queueCollapse();
  });
- panel.addEventListener('focusout', () => {
-  if (getState() === 'peek' && !pointerInTool) queueCollapse(260);
- });
- rail.addEventListener('pointerenter', (e) => {
-  if (e.pointerType === 'mouse') peek();
- });
- rail.addEventListener('click', () => {
-  peek();
-  pinBtn.focus({ preventScroll: true });
+ listen(document, 'pointerdown', (e) => {
+  if (getState() === 'peek' && !wrapper.contains(e.target) && !launcher.contains(e.target)) {
+   setState('collapsed');
+  }
+ }, true);
+ rail.addEventListener('click', (e) => {
+  setState('peek');
+  if (e.detail === 0) pinBtn.focus({ preventScroll: true });
  });
  panel.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !isTyping(e)) {
@@ -12946,10 +12964,8 @@ function bindPanel(wrapper) {
   "mouseover", "mouseout", "click", "dblclick", "contextmenu", "wheel"]) {
   wrapper.addEventListener(type, (e) => e.stopPropagation());
  }
- pinBtn.addEventListener('click', () => {
-  if (getState() === 'pinned') peek();
-  else setState('pinned');
- });
+ pinBtn.addEventListener('click', () => setState(getState() === 'pinned' ? 'peek' : 'pinned'));
+ wrapper.querySelector('#cqt-btn-minimize').addEventListener('click', () => setState('collapsed'));
  wrapper.querySelector('#cqt-btn-close').addEventListener('click', () => setState('closed'));
  launcher.addEventListener("click", togglePanel);
 
