@@ -33,7 +33,7 @@ RUN CLIENT_PLUGINS="${CLIENT_PLUGINS}" \
 SOURCE_MAPS_ENABLED="${SOURCE_MAPS_ENABLED}" \
 NODE_OPTIONS="--require=/tmp/cvat-ui/build-worker-limit.cjs" yarn run build:cvat-ui
 
-FROM nginxinc/nginx-unprivileged:1.31.5-alpine3.24-slim
+FROM nginxinc/nginx-unprivileged:1.31.7-alpine3.24-slim
 
 # Replace default.conf configuration to remove unnecessary rules
 COPY cvat-ui/react_nginx.conf /etc/nginx/conf.d/default.conf
