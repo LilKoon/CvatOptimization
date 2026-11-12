@@ -91,8 +91,69 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
 #cvat-cuboid-toolbox #cqt-health-pill .cqt-hp-bar {
     height: auto;
     flex: none;
-    flex-wrap: wrap;
     gap: 5px;
+}
+
+#cvat-cuboid-toolbox #cqt-tb-health .cqt-hp-bar {
+    flex-wrap: nowrap;
+}
+
+#cvat-cuboid-toolbox #cqt-health-pill .cqt-hp-obj {
+    flex: 0 1 auto;
+    min-width: 0;
+}
+
+#cvat-cuboid-toolbox #cqt-health-pill .cqt-hp-lbl {
+    min-width: 0;
+}
+
+#cvat-cuboid-toolbox .cqt-hp-anchor-row {
+    display: flex;
+    padding: 4px 6px;
+    border-top: 1px solid var(--cqt-border-subtle);
+    background: var(--cqt-bg-bar);
+}
+
+#cvat-cuboid-toolbox .cqt-hp-anchor-row button {
+    height: auto;
+    min-height: 20px;
+    cursor: pointer;
+}
+
+#cvat-cuboid-toolbox :is(#cqt-health-pill, #cqt-tb-health).open .cqt-hp-anchor-row,
+#cvat-cuboid-toolbox .cqt-hp-anchor-row[hidden],
+#cvat-cuboid-toolbox .cqt-hp-anchor-details[hidden] {
+    display: none;
+}
+
+#cvat-cuboid-toolbox .cqt-hp-anchor-details {
+    display: block;
+}
+
+#cvat-cuboid-toolbox .cqt-hp-anchor-details > summary {
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#cvat-cuboid-toolbox .cqt-hp-anchor-details > summary .cqt-hp-dot {
+    margin: 0 5px;
+    vertical-align: middle;
+}
+
+#cvat-cuboid-toolbox .cqt-hp-anchor-content {
+    display: grid;
+    gap: 5px;
+    margin-top: 7px;
+}
+
+#cvat-cuboid-toolbox .cqt-hp-anchor-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+#cvat-cuboid-toolbox :is(.cqt-hp-anchor-list, .cqt-hp-sec-head) > .cqt-btn {
+    flex: none;
 }
 
 #cvat-cuboid-toolbox #cqt-health-pill .cqt-hp-pop {

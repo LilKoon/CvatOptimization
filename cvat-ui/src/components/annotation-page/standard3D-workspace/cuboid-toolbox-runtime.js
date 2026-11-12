@@ -3348,8 +3348,12 @@ function jobLabelForGroup(group) {
  return labels.find((l) => normalizeClass(l.name) === normalizeClass(group)) || labels[0] || null;
 }
 
+function getLimitKeyForLabel(label) {
+ return findLimitKey(label) || findLimitKey(findClassGroup(label));
+}
+
 function getLimitsForLabel(label) {
- const key = findLimitKey(label) || findLimitKey(findClassGroup(label));
+ const key = getLimitKeyForLabel(label);
  return key ? getLimits()[key] : null;
 }
 
@@ -10903,8 +10907,8 @@ async function inspectObjectHealth(id, force = false) {
   : { l: allFrames[0].l, w: allFrames[0].w, h: allFrames[0].h };
 
  const tol = 0.005;
- const limKey = findLimitKey(label);
- const lim = getLimitsForLabel(label);
+ const limKey = getLimitKeyForLabel(label);
+ const lim = limKey ? getLimits()[limKey] : null;
 
  for (const x of visFrames) {
   x.dl = x.l - stdLWH.l;
@@ -11082,20 +11086,26 @@ function bindHealthPopEvents(rootEl) {
 
 async function handleHealthAction(act, target, rootEl) {
  const id = dock.id ?? resolveTargetId();
- if (act === 'toggle-pop') {
-  if (rootEl?.id === 'cqt-tb-health') {
-   health.tbOpen = !health.tbOpen;
-   rootEl.classList.toggle('open', health.tbOpen);
-   const pop = rootEl.querySelector('.cqt-hp-pop');
-   if (pop) pop.style.display = health.tbOpen ? 'flex' : 'none';
-  } else if (health.el) {
-   health.open = !health.open;
-   health.el.classList.toggle('open', health.open);
-   const pop = health.el.querySelector('.cqt-hp-pop');
-   if (pop) pop.style.display = health.open ? 'flex' : 'none';
-   dockLayout();
-  }
+ if (act === 'toggle-pop' || act === 'show-anchor') {
+  const floating = rootEl === health.el;
+  const showAnchor = act === 'show-anchor';
+  const open = showAnchor || !rootEl.classList.contains('open');
+  if (floating) health.open = open;
+  else health.tbOpen = open;
+  rootEl.classList.toggle('open', open);
+  rootEl.querySelector('.cqt-hp-expand').setAttribute('aria-expanded', String(open));
+  rootEl.querySelector('.cqt-hp-pop').style.display = open ? 'flex' : 'none';
+  if (floating) healthLayout();
   await healthRefresh(true);
+  if (showAnchor && rootEl.classList.contains('open')) {
+   const details = rootEl.querySelector('[data-sec="anchor"]');
+   if (!details.hidden) {
+    details.open = true;
+    const summary = details.querySelector('summary');
+    summary.focus({ preventScroll: true });
+    summary.scrollIntoView({ block: 'nearest' });
+   }
+  }
   return;
  }
  if (act === 'jump-frame') {
@@ -11197,6 +11207,52 @@ async function handleHealthAction(act, target, rootEl) {
  }
 }
 
+const HEALTH_ANCHOR_ROW_HTML = `
+<div class="cqt-hp-anchor-row" hidden>
+ <button type="button" class="cqt-hp-chip is-purple" data-act="show-anchor">
+  <span class="cqt-hp-dot purple"></span><span data-role="anchor-label"></span>${ICONS.chevronDown}
+ </button>
+</div>`;
+
+const HEALTH_ANCHOR_DETAILS_HTML = `
+<details class="cqt-hp-sec cqt-hp-anchor-details" data-sec="anchor" hidden>
+ <summary><span class="cqt-hp-dot purple"></span><span data-role="anchor-label"></span></summary>
+ <div class="cqt-hp-anchor-content"></div>
+</details>`;
+
+function renderHealthAnchor(rootEl, data) {
+ const row = rootEl.querySelector('.cqt-hp-anchor-row');
+ const details = rootEl.querySelector('[data-sec="anchor"]');
+ const ids = data?.anchorIds || [];
+ row.hidden = !ids.length;
+ details.hidden = !ids.length;
+ const targetId = ids.length ? String(data.id) : '';
+ if (details.dataset.targetId !== targetId) {
+  details.dataset.targetId = targetId;
+  details.open = false;
+ }
+ if (!ids.length) return;
+
+ const missing = data.missingAnchorFrames;
+ const label = missing.length ? `Thiếu Anchor · ${missing.length} frame` : `Anchor · ${ids.length} mốc`;
+ const compactLabel = row.querySelector('[data-role="anchor-label"]');
+ if (compactLabel.textContent !== label) compactLabel.textContent = label;
+ if (!rootEl.classList.contains('open')) return;
+
+ const detailLabel = details.querySelector('[data-role="anchor-label"]');
+ if (detailLabel.textContent !== label) detailLabel.textContent = label;
+ const key = `${ids.join(',')}/${missing.map(({ frame }) => frame).join(',')}`;
+ if (details.dataset.contentKey === key) return;
+ details.dataset.contentKey = key;
+ const jumps = formatFrameRanges(missing.map(({ frame }) => frame)).map(({ from, text }) =>
+  `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-act="jump-frame" data-frame="${from}" title="Tới frame ${from}">${text}</button>`).join('');
+ details.querySelector('.cqt-hp-anchor-content').innerHTML = `
+  <div class="cqt-label">Anchor theo thứ tự ưu tiên</div>
+  <div class="cqt-hp-anchor-list">${ids.map((id) => `<span class="cqt-badge">#${id}</span>`).join('')}</div>
+  ${jumps ? `<div class="cqt-label">Frame thiếu Anchor</div><div class="cqt-hp-anchor-list">${jumps}</div>` : ''}
+ `;
+}
+
 function healthCreate() {
  const el = document.createElement('div');
  el.id = 'cqt-health-pill';
@@ -11209,9 +11265,10 @@ function healthCreate() {
 <div class="cqt-hp-quick">
 <button class="cqt-btn cqt-btn-danger cqt-sm" data-act="cut-here" title="Outside: từ frame hiện tại tới hết track (${OPTION_KEY}X)">${ICONS.eyeOff}<span>Out F→Hết</span></button>
 <button class="cqt-btn cqt-btn-secondary cqt-sm cqt-hp-btn-in" data-act="in-to-end" title="Inside: hiện lại từ frame hiện tại tới hết track">${ICONS.eye}<span>In F→Hết</span></button>
+<button type="button" class="cqt-hp-expand" data-act="toggle-pop" aria-expanded="false" aria-label="Mở hoặc thu gọn chi tiết HUD" title="Mở rộng / Thu gọn chi tiết kiểm tra Frame, Outside &amp; Inside">${ICONS.chevronDown}</button>
 </div>
-<button class="cqt-hp-expand" data-act="toggle-pop" title="Mở rộng / Thu gọn chi tiết kiểm tra Frame, Outside &amp; Inside">${ICONS.chevronDown}</button>
 </div>
+${HEALTH_ANCHOR_ROW_HTML}
 <div class="cqt-hp-pop" style="display:none;">
 <div class="cqt-hp-sec">
 <div class="cqt-hp-sec-head">
@@ -11225,7 +11282,7 @@ function healthCreate() {
 </div>
 <div class="cqt-hp-sec" data-sec="sync"></div>
 <div class="cqt-hp-sec" data-sec="limit"></div>
-<div class="cqt-hp-sec" data-sec="anchor" style="display:none;"></div>
+${HEALTH_ANCHOR_DETAILS_HTML}
 <div class="cqt-hp-sec">
 <div class="cqt-hp-sec-head">
 <span class="cqt-hp-sec-title">Outside / Inside (2 nút xác nhận độc lập)</span>
@@ -11269,6 +11326,7 @@ function healthCreate() {
  bindHealthPopEvents(el);
 
  bindHudGrip(health, LS.healthPos);
+ el.querySelector('[data-sec="anchor"]').addEventListener('toggle', () => healthLayout());
 
  el.addEventListener('click', guarded(async (e) => {
   const target = e.target.closest('[data-act]');
@@ -11403,36 +11461,6 @@ function populateHealthPop(rootEl, d, curFrame, curRec) {
   }
  }
 
- const anchorSec = rootEl.querySelector('[data-sec="anchor"]');
- if (anchorSec) {
-  if (d.anchorIds && d.anchorIds.length > 0) {
-   if (d.missingAnchorFrames && d.missingAnchorFrames.length > 0) {
-    const missingRanges = formatFrameRanges(d.missingAnchorFrames.map((x) => x.frame));
-    const jumpBtns = missingRanges.slice(0, 8).map((rg) => `
-     <button class="cqt-btn cqt-btn-secondary cqt-sm" data-act="jump-frame" data-frame="${rg.from}" title="Nhảy tới Frame ${rg.from}">${rg.text}</button>
-    `).join('');
-    anchorSec.innerHTML = `
-     <div class="cqt-hp-sec-head">
-      <span class="cqt-hp-sec-title"><span class="cqt-hp-dot purple"></span>Mất Anchor #${d.anchorIds.join(', #')} tại ${d.missingAnchorFrames.length}F</span>
-     </div>
-     <div class="cqt-row cqt-wrap" style="gap:4px; margin-top:4px;">${jumpBtns}</div>
-     <div class="cqt-hint" style="margin-top:2px;">Bấm nút dải frame để nhảy tới chỗ mất Anchor, trỏ xe chuẩn rồi bấm <b>${OPTION_KEY}B</b> để thêm Anchor.</div>
-    `;
-    anchorSec.style.display = 'flex';
-   } else {
-    anchorSec.innerHTML = `
-     <div class="cqt-hp-sec-head">
-      <span class="cqt-hp-sec-title"><span class="cqt-hp-dot green"></span>Anchor #${d.anchorIds.join(', #')} đầy đủ trên toàn bộ track</span>
-     </div>
-    `;
-    anchorSec.style.display = 'flex';
-   }
-  } else {
-   anchorSec.style.display = 'none';
-   anchorSec.innerHTML = '';
-  }
- }
-
  const outStateEl = rootEl.querySelector('.cqt-hp-out-state');
  if (outStateEl) {
   outStateEl.textContent = curRec?.outside ? `F${curFrame}: OUTSIDE` : `F${curFrame}: INSIDE`;
@@ -11451,8 +11479,10 @@ async function healthRefresh(force = false) {
   if (hudVisible) {
    health.el.querySelector('.cqt-hp-obj').innerHTML = `<span class="cqt-hp-muted">Chọn 1 object</span>`;
    health.el.querySelector('.cqt-hp-badges').innerHTML = '';
+   renderHealthAnchor(health.el, null);
   }
   if (tbEl) {
+   renderHealthAnchor(tbEl, null);
    const tbBadges = tbEl.querySelector('.cqt-hp-badges');
    if (tbBadges) tbBadges.innerHTML = `<span class="cqt-hp-chip is-muted">Chưa chọn object</span>`;
   }
@@ -11464,8 +11494,10 @@ async function healthRefresh(force = false) {
   if (hudVisible) {
    health.el.querySelector('.cqt-hp-obj').innerHTML = `<b>#${id}</b> <span class="cqt-hp-muted">không có cuboid</span>`;
    health.el.querySelector('.cqt-hp-badges').innerHTML = '';
+   renderHealthAnchor(health.el, null);
   }
   if (tbEl) {
+   renderHealthAnchor(tbEl, null);
    const tbBadges = tbEl.querySelector('.cqt-hp-badges');
    if (tbBadges) tbBadges.innerHTML = `<span class="cqt-hp-chip is-muted">#${id} không phải cuboid</span>`;
   }
@@ -11495,27 +11527,19 @@ async function healthRefresh(force = false) {
   limitChip = `<span class="cqt-hp-chip is-muted" title="Class &quot;${escapeHtml(d.label)}&quot; chưa đặt ngưỡng Limit trong Cài đặt"><span>No Limit</span></span>`;
  }
 
- let anchorChip = '';
- if (d.anchorIds && d.anchorIds.length > 0) {
-  const badCount = d.missingAnchorFrames.length;
-  if (badCount > 0) {
-   anchorChip = `<span class="cqt-hp-chip is-purple" title="Anchor #${d.anchorIds.join(', #')} bị mất tại ${badCount} frame. Bấm để xem chi tiết."><span class="cqt-hp-dot purple"></span><span>Mất Anchor (${badCount}F)</span></span>`;
-  } else {
-   anchorChip = `<span class="cqt-hp-chip is-purple" title="Anchor #${d.anchorIds.join(', #')} có mặt đầy đủ"><span class="cqt-hp-dot purple"></span><span>${ICONS.anchor}#${d.anchorIds.join(',')}</span></span>`;
-  }
- }
-
  if (hudVisible) {
   const objEl = health.el.querySelector('.cqt-hp-obj');
   const badgesEl = health.el.querySelector('.cqt-hp-badges');
   objEl.innerHTML = `<b>#${d.id}</b> <span class="cqt-hp-lbl">${escapeHtml(d.label || '?')}</span> <span class="cqt-hp-f">F${curFrame ?? '?'}</span> <span class="cqt-badge ${curBadgeCls}">${curState}</span>`;
-  badgesEl.innerHTML = syncChip + limitChip + anchorChip;
+  badgesEl.innerHTML = syncChip + limitChip;
+  renderHealthAnchor(health.el, d);
   if (health.open) populateHealthPop(health.el, d, curFrame, curRec);
  }
 
  if (tbEl) {
   const tbBadges = tbEl.querySelector('.cqt-hp-badges');
-  if (tbBadges) tbBadges.innerHTML = syncChip + limitChip + anchorChip;
+  if (tbBadges) tbBadges.innerHTML = syncChip + limitChip;
+  renderHealthAnchor(tbEl, d);
   if (health.tbOpen) populateHealthPop(tbEl, d, curFrame, curRec);
  }
 }
@@ -12021,9 +12045,10 @@ ${ICONS.redo}
 <div class="cqt-hp-quick" style="margin-left:auto;">
 <button class="cqt-btn cqt-btn-danger cqt-sm" data-act="cut-here" title="Outside: từ frame hiện tại tới hết track (${OPTION_KEY}X)">${ICONS.eyeOff}<span>Out F→Hết</span></button>
 <button class="cqt-btn cqt-btn-secondary cqt-sm cqt-hp-btn-in" data-act="in-to-end" title="Inside: hiện lại từ frame hiện tại tới hết track">${ICONS.eye}<span>In F→Hết</span></button>
+<button type="button" class="cqt-hp-expand" data-act="toggle-pop" aria-expanded="false" aria-label="Mở hoặc thu gọn chi tiết HUD" title="Mở rộng / Thu gọn chi tiết kiểm tra Frame, Outside &amp; Inside">${ICONS.chevronDown}</button>
 </div>
-<button class="cqt-hp-expand" data-act="toggle-pop" title="Mở rộng / Thu gọn chi tiết kiểm tra Frame, Outside &amp; Inside">${ICONS.chevronDown}</button>
 </div>
+${HEALTH_ANCHOR_ROW_HTML}
 <div class="cqt-hp-pop" style="display:none;">
 <div class="cqt-hp-sec">
 <div class="cqt-hp-sec-head">
@@ -12037,7 +12062,7 @@ ${ICONS.redo}
 </div>
 <div class="cqt-hp-sec" data-sec="sync"></div>
 <div class="cqt-hp-sec" data-sec="limit"></div>
-<div class="cqt-hp-sec" data-sec="anchor" style="display:none;"></div>
+${HEALTH_ANCHOR_DETAILS_HTML}
 <div class="cqt-hp-sec">
 <div class="cqt-hp-sec-head">
 <span class="cqt-hp-sec-title">Outside / Inside (2 nút xác nhận độc lập)</span>
