@@ -3369,6 +3369,18 @@ function refreshLimitClassList(selected) {
  loadLimitForm(select.value);
 }
 
+function writeLimits(limits, selected) {
+ lsSet(LS.limits, limits);
+ setField('cqt-limit-class-name', '');
+ refreshLimitClassList(selected);
+ invalidateHealthCache();
+ invalidateQC();
+ if (fc.open) {
+  if (fc.cfg.filter === 'issue') fcRenderList();
+  else fcRefreshAll();
+ }
+}
+
 function saveLimitForm() {
  const key = String(val('cqt-limit-class-name') || '').trim() || String(val('cqt-limit-class') || '').trim();
  if (!key) return fail('Chọn class có sẵn hoặc nhập tên class mới.');
@@ -3378,9 +3390,7 @@ function saveLimitForm() {
  const all = getLimits();
  const actualKey = findLimitKey(key) || key;
  all[actualKey] = { l: [v[0], v[1]], w: [v[2], v[3]], h: [v[4], v[5]] };
- lsSet(LS.limits, all);
- setField('cqt-limit-class-name', '');
- refreshLimitClassList(actualKey);
+ writeLimits(all, actualKey);
  setStatus(`💾 Đã lưu limits "${actualKey}": ${limitText(all[actualKey])}.`, 'success');
 }
 
@@ -3389,26 +3399,31 @@ function deleteLimitClass() {
  const all = getLimits();
  if (!key || !(key in all) || !confirm(`Xoá limits của class "${key}"?`)) return;
  delete all[key];
- lsSet(LS.limits, all);
- refreshLimitClassList();
+ writeLimits(all);
  setStatus(`Đã xoá limits class "${key}".`, 'success');
 }
 
 function resetLimits() {
  if (!confirm('Reset toàn bộ limits về ngưỡng tiêu chuẩn?')) return;
- lsSet(LS.limits, JSON.parse(JSON.stringify(DEFAULT_LIMITS)));
- refreshLimitClassList('vehicle');
+ writeLimits(JSON.parse(JSON.stringify(DEFAULT_LIMITS)), 'vehicle');
  setStatus('↺ Đã reset limits về tiêu chuẩn.', 'success');
 }
 
 async function fillClassNameFromObject() {
- const id = requireTarget();
- if (id === null) return;
- const label = labelName(await getState(id, getFrame()));
+ let label = '';
+ if ($('cqt-fc-limits')?.contains($('cqt-limit-editor'))) {
+  label = fcRowByFrame(fcLayout() === 'focus' ? fc.focusFrame : fc.lastClicked)?.label || fc.allRows[0]?.label;
+ } else {
+  const id = requireTarget();
+  if (id === null) return;
+  label = labelName(await getState(id, getFrame()));
+ }
  if (!label) return fail('Không lấy được label của object ở frame hiện tại.');
- setField('cqt-limit-class-name', label);
  const key = findLimitKey(label);
- if (key) refreshLimitClassList(key);
+ const inherited = getLimitKeyForLabel(label);
+ if (inherited) refreshLimitClassList(inherited);
+ else loadLimitForm(null);
+ setField('cqt-limit-class-name', key ? '' : label);
  setStatus(key ? `📌 Class "${label}" — đã nạp limits có sẵn.` : `📌 Class "${label}" — nhập limits rồi bấm Lưu.`, 'success');
 }
 
@@ -3428,8 +3443,11 @@ function classScope() {
  const b = jobBounds();
  if (!b) return fail('Chưa kết nối CVAT Job!');
  if (isChecked('cqt-limit-class-all-job')) return { from: b.start, to: b.stop };
- const from = intVal('cqt-frame-start'), to = intVal('cqt-frame-end');
- if (!Number.isInteger(from) || !Number.isInteger(to) || from > to) return fail('Dải frame không hợp lệ.');
+ const prefix = $('cqt-fc-limits')?.contains($('cqt-limit-editor')) ? 'cqt-fc-limit' : 'cqt-frame';
+ const from = intVal(`${prefix}-start`), to = intVal(`${prefix}-end`);
+ if (!Number.isInteger(from) || !Number.isInteger(to) || from < b.start || to > b.stop || from > to) {
+  return fail(`Dải frame phải nằm trong F${b.start}–F${b.stop}.`);
+ }
  return { from, to };
 }
 
@@ -3492,6 +3510,7 @@ async function clampClassLimits() {
   if (await batch.edit(s, f, mutate)) objects.add(s.clientID);
  });
  const res = await batch.finish();
+ if (res.changed && fc.open && !fc.toolsOpen) await fcReloadStates();
  if (!res.changed) return setStatus(`ℹ️ Class "${className}": không có frame nào ngoài limits.`, 'success');
  setStatus(`📏 Clamp class "${className}": ${objects.size} object, ${res.changed} frame.` + editSuffix(res), 'success');
 }
@@ -5486,7 +5505,13 @@ function openQCWorkspace() {
  const bind = (id, action, event = 'click') => $(id).addEventListener(event, guarded(action));
  bind('cqt-qc-back', () => {
   closeQCWorkspace(false);
-  if (fc.open && !fc.toolsOpen) closeFullControl();
+  if (fc.open && Number.isInteger(fc.targetId)) {
+   return guarded(async () => {
+    if (!fc.toolsOpen) await fcToggleTools();
+    if (fc.toolsOpen) openToolboxTab('qa');
+   })();
+  }
+  if (fc.open) closeFullControl();
   if (stealthUI) togglePanel();
   else panelApi?.setState(toolboxWasPinned ? 'pinned' : 'peek');
   const panel = $('cvat-quicktool-panel');
@@ -7145,7 +7170,7 @@ const fc = {
  hover: null,
  extent: { l: 4.5, w: 1.9, h: 1.6 },
  observer: null,
- pending: new Set(),
+ pending: new Map(),
  raf: 0,
 };
 
@@ -7626,6 +7651,27 @@ async function fcToggleTools() {
  $('cqt-fc-tools')?.setAttribute('aria-pressed', String(fc.toolsOpen));
 }
 
+function openToolboxTab(tab) {
+ const button = root.querySelector(`#cvat-quicktool-panel .cqt-tab[data-tab="${tab}"]`);
+ button?.click();
+ button?.focus({ preventScroll: true });
+}
+
+function fcShowLimits(open) {
+ const slot = $('cqt-fc-limits');
+ const editor = $('cqt-limit-editor');
+ if (!slot || !editor || slot.hidden === !open) return;
+ slot.hidden = !open;
+ $('cqt-fc-edit-limits').setAttribute('aria-expanded', String(open));
+ (open ? slot : $('cqt-limit-home')).appendChild(editor);
+ if (!open) return;
+ const bounds = jobBounds();
+ setField('cqt-fc-limit-start', intVal('cqt-frame-start') ?? bounds?.start ?? '');
+ setField('cqt-fc-limit-end', intVal('cqt-frame-end') ?? bounds?.stop ?? '');
+ if (fc.allRows.length) void fillClassNameFromObject();
+ $('cqt-limit-class').focus({ preventScroll: true });
+}
+
 // Cùng 1 tỉ lệ m/px cho mọi hàng để so sánh trực quan giữa các frame
 function fcComputeExtent() {
  const live = fc.allRows.filter((r) => !r.outside);
@@ -7970,9 +8016,23 @@ function fcViewGeom(canvas, view, row = null) {
  const m = 1.2;
  const ew = view === 'side' ? l + 2 * m : w + 2 * m;
  const eh = view === 'top' ? l + 2 * m : h + 2 * m;
- const k = Math.min(cw / ew, ch / eh) * zoom;
- const pan = canvas._pan || row?.pan2d?.[view] || [0, 0];
+ const viewport = row?.view2d?.[view];
+ const focused = row && !canvas._extent && fcLayout() === 'focus';
+ const boxW = Math.abs(row?.base[view === 'side' ? 6 : 7] || 0);
+ const boxH = Math.abs(row?.base[view === 'top' ? 6 : 8] || 0);
+ const fit = focused
+  ? Math.min(Math.max(1, Math.min(cw - 32, cw * 0.8)) / Math.max(0.3, boxW),
+   Math.max(1, Math.min(ch - 40, ch * 0.8)) / Math.max(0.3, boxH))
+  : Math.min(cw / ew, ch / eh);
+ const k = fit * zoom * (viewport?.zoom ?? 1);
+ const pan = canvas._pan || viewport?.pan || [0, 0];
  return { cw, ch, cx: cw / 2 + pan[0] * k, cy: ch / 2 + pan[1] * k, k };
+}
+
+function fcSetView2D(row, view, viewport) {
+ row.view2d ??= {};
+ row.view2d[view] = viewport;
+ fcSchedule([row], view);
 }
 
 // Hệ khung 2D chuẩn xác của Box trên từng hình chiếu TOP / SIDE / FRONT (tính cả dịch tâm & xoay Yaw/Pitch/Roll)
@@ -8060,7 +8120,7 @@ function fcStrokePoly(ctx, pts, color, width, dash) {
  ctx.setLineDash([]);
 }
 
-// Rasterize original points directly to screen pixels. The sampled scene remains the drag preview.
+// Rasterize original points directly to screen pixels, including during camera and box drags.
 function fcDrawFullScene(ctx, g, pal, points, anchor, box, camera, plane) {
  const width = Math.ceil(g.cw), height = Math.ceil(g.ch);
  if (!fullSceneRaster) {
@@ -8180,12 +8240,11 @@ function fcRender3D(row, canvas, g, pal) {
  const plane = fcGroundPlane(row);
  const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
  const fullScene = isScene3D && fc.cfg.fullSceneDetail ? fullSceneCache.get(sceneKey(row.frame)) : null;
- const useFullScene = fullScene && !fc.drag?.moved;
- canvas.dataset.cloudDensity = useFullScene ? 'full' : isScene3D ? 'preview' : 'near';
- if (useFullScene) fcDrawFullScene(ctx, g, pal, fullScene, anchor, p, camera, plane);
+ canvas.dataset.cloudDensity = fullScene ? 'full' : isScene3D ? 'preview' : 'near';
+ if (fullScene) fcDrawFullScene(ctx, g, pal, fullScene, anchor, p, camera, plane);
 
  // 1. Đám mây điểm toàn cảnh CVAT (phân tầng Z: mặt đường, thân xe xung quanh, cây cối/cột đèn trên cao)
- if (!useFullScene && sceneCloud) {
+ if (!fullScene && sceneCloud) {
   const rTight = cloud ? 0.5 * Math.hypot(row.base[6], row.base[7]) + 2.8 : 0;
   const rTight2 = rTight * rTight;
   const scGround = new Path2D(), scLow = new Path2D(), scHigh = new Path2D();
@@ -8218,7 +8277,7 @@ function fcRender3D(row, canvas, g, pal) {
  }
 
  // 2. Point cloud chi tiết quanh & trong xe mục tiêu (điểm trong xe giữ màu ngọc dạ quang #34d399)
- if (!useFullScene && cloud) {
+ if (!fullScene && cloud) {
   const R = rotationMatrix(p[3], p[4], p[5]);
   const hl = Math.abs(p[6]) / 2, hw = Math.abs(p[7]) / 2, hh = Math.abs(p[8]) / 2;
   const inside = new Path2D(), aroundGround = new Path2D(), aroundBody = new Path2D(), aroundHigh = new Path2D();
@@ -8473,7 +8532,7 @@ function fcRender3D(row, canvas, g, pal) {
  const z3dVal = (row.zoom3d ?? fc.cfg.zoom3d ?? 1).toFixed(1);
  const panTag = hasPan ? (focusId ? ` · Tâm #${focusId}` : ` · Lệch (${panU.toFixed(1)},${panV.toFixed(1)}m)`) : '';
  ctx.fillText(`Góc ${(az * DEG).toFixed(0)}°/${(el * DEG).toFixed(0)}° · Zoom ${z3dVal}×${panTag}`, 36, g.ch - 6);
- if ((!cloud && !sceneCloud && !useFullScene) || (isScene3D && fc.cfg.fullSceneDetail && !fullScene)) {
+ if (!fullScene && ((!cloud && !sceneCloud) || (isScene3D && fc.cfg.fullSceneDetail))) {
   ctx.textAlign = 'right';
   ctx.fillText(isScene3D && fc.cfg.fullSceneDetail ? 'Bấm Tới để nạp đủ điểm' : 'chưa có cloud', g.cw - 6, 30);
   ctx.textAlign = 'left';
@@ -8665,7 +8724,7 @@ function fcRenderView(row, canvas) {
    const [ex, ey] = bf.pt(nh, nv);
    const isHot = (hover?.kind === 'face' && hover.face === face) ||
     (hover?.kind === 'corner' && (hover.faceH === face || hover.faceV === face));
-   const r = isHot ? 3.4 : 2.1;
+   const r = isHot ? 4 : 2.6;
    ctx.fillStyle = isHot ? pal.boxFront : pal.handleFill;
    ctx.strokeStyle = isHot ? pal.boxFront : pal.boxStroke;
    ctx.lineWidth = 1.1;
@@ -8675,7 +8734,7 @@ function fcRenderView(row, canvas) {
   for (const [faceH, faceV, nh, nv] of FC_CORNERS[view]) {
    const [cx0, cy0] = bf.pt(nh, nv);
    const isHot = hover?.kind === 'corner' && hover.faceH === faceH && hover.faceV === faceV;
-   const r = isHot ? 4.4 : 2.9;
+   const r = isHot ? 5 : 3.4;
    ctx.fillStyle = isHot ? pal.boxFront : pal.handleFill;
    ctx.strokeStyle = isHot ? pal.handleFill : (pal.boxFront || pal.boxStroke);
    ctx.lineWidth = isHot ? 1.5 : 1.2;
@@ -8711,26 +8770,33 @@ function fcRenderView(row, canvas) {
  }
 }
 
-function fcRenderRow(row) {
+function fcRenderRow(row, views = null) {
  if (!row.visible || !row.el) return;
  fcGroundPlane(row);
- for (const canvas of row.el.querySelectorAll('canvas')) fcRenderView(row, canvas);
- fcUpdateRowMeta(row);
+ for (const canvas of row.el.querySelectorAll('canvas')) {
+  if (!views || views.has(canvas.dataset.view)) fcRenderView(row, canvas);
+ }
+ if (!views) fcUpdateRowMeta(row);
 }
 
-function fcSchedule(rows) {
- for (const r of rows) if (r?.visible) fc.pending.add(r);
+function fcSchedule(rows, view = null) {
+ for (const row of rows) {
+  if (!row?.visible) continue;
+  if (!view) fc.pending.set(row, null);
+  else if (!fc.pending.has(row)) fc.pending.set(row, new Set([view]));
+  else fc.pending.get(row)?.add(view);
+ }
  if (fc.raf || !fc.pending.size) return;
  fc.raf = requestAnimationFrame(() => {
   fc.raf = 0;
   const list = [...fc.pending];
   fc.pending.clear();
-  for (const r of list) fcRenderRow(r);
+  for (const [row, views] of list) fcRenderRow(row, views);
  });
 }
 
-function fcRerenderVisible() {
- fcSchedule(fc.rows.filter((r) => r.visible));
+function fcRerenderVisible(view = null) {
+ fcSchedule(fc.rows, view);
 }
 
 // ---- DOM danh sách ----
@@ -8753,7 +8819,8 @@ function fcRowHTML(row) {
    <button class="cqt-btn cqt-btn-danger cqt-sm cqt-fc-out-btn" data-act="out-toggle" title="Bấm: Cắt Outside từ frame này tới hết Track · Shift+Bấm: Chỉ đảo riêng tại frame này">${ICONS.eyeOff}<span>Out→Hết</span></button>
    <div class="cqt-fc-fill" data-act="fill" title="Nhấn giữ rồi kéo xuống (hoặc lên) để áp dụng theo chế độ Kéo áp dụng">${ICONS.arrowDownLine}<span>Kéo áp dụng</span></div>
   </div>
-  ${FC_VIEWS.map((v) => `<div class="cqt-fc-cell cqt-fc-view" data-view-cell="${v}"><canvas data-view="${v}"></canvas></div>`).join('')}
+  ${FC_VIEWS.map((v) => `<div class="cqt-fc-cell cqt-fc-view" data-view-cell="${v}"><canvas data-view="${v}"></canvas>${v === '3d' ? '' :
+   `<button type="button" data-act="reset-view" class="cqt-btn cqt-btn-secondary cqt-sm cqt-fc-reset-view" aria-label="Căn lại góc ${v}" title="Căn lại góc ${v} (hoặc nhấp đúp vào nền)">${ICONS.crosshair}</button>`}</div>`).join('')}
   <div class="cqt-fc-cell cqt-fc-params">
    <div class="cqt-fc-grid6">
     <label title="Chiều dài L (m)">L${num('l', '0.01')}</label>
@@ -9268,7 +9335,7 @@ function fcStartCanvasDrag(e, row, canvas) {
 
  if (hit.kind === 'pan2d') {
   fc.hover = null;
-  const curPan = canvas._pan || row?.pan2d?.[view] || [0, 0];
+  const curPan = row.view2d?.[view]?.pan || [0, 0];
   fc.drag = {
    type: 'pan2d', row, view, canvas, sx: e.clientX, sy: e.clientY,
    k: g.k, pan0: [...curPan], moved: false, text: '',
@@ -9308,7 +9375,7 @@ function fcDragOrbit3D(e) {
  if (d.singleRow) {
   d.row.camAz = az;
   d.row.camEl = el;
-  fcSchedule([d.row]);
+  fcSchedule([d.row], '3d');
  } else {
   for (const r of fc.allRows) {
    delete r.camAz;
@@ -9316,7 +9383,7 @@ function fcDragOrbit3D(e) {
   }
   fc.cfg.camAz = az;
   fc.cfg.camEl = el;
-  fcRerenderVisible();
+  fcRerenderVisible('3d');
  }
 }
 
@@ -9339,7 +9406,7 @@ function fcDragPan3D(e) {
  if (d.singleRow) {
   d.row.camPan = [panU, panV, panW];
   d.row.camFocusId = null;
-  fcSchedule([d.row]);
+  fcSchedule([d.row], '3d');
  } else {
   for (const r of fc.allRows) {
    delete r.camPan;
@@ -9347,7 +9414,7 @@ function fcDragPan3D(e) {
   }
   fc.cfg.camPan = [panU, panV, panW];
   fc.cfg.camFocusId = null;
-  fcRerenderVisible();
+  fcRerenderVisible('3d');
  }
 }
 
@@ -9355,13 +9422,13 @@ function fcDragPan2D(e) {
  const d = fc.drag;
  if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 2) return;
  d.moved = true;
- const dx = (e.clientX - d.sx) / Math.max(8, d.k);
- const dy = -(e.clientY - d.sy) / Math.max(8, d.k);
+ const dx = (e.clientX - d.sx) / d.k;
+ const dy = (e.clientY - d.sy) / d.k;
  const panX = d.pan0[0] + dx;
  const panY = d.pan0[1] + dy;
- d.canvas._pan = [panX, panY];
  d.text = `dịch 2D (${panX.toFixed(2)}, ${panY.toFixed(2)})m`;
- fcSchedule([d.row]);
+ if (d.dock) d.canvas._pan = [panX, panY];
+ else fcSetView2D(d.row, d.view, { ...d.row.view2d?.[d.view], pan: [panX, panY] });
 }
 
 function fcDragEdit(e) {
@@ -9572,12 +9639,12 @@ async function fcOnMouseUp(e) {
  if (d.type === 'orbit3d' || d.type === 'pan3d') {
   if (!d.moved && e) fcSelectClick(d.row, e);
   else if (!d.singleRow) saveFcSettings({ camAz: fc.cfg.camAz, camEl: fc.cfg.camEl, camPan: fc.cfg.camPan });
-  if (d.singleRow) fcSchedule([d.row]);
-  else fcRerenderVisible();
+  if (d.singleRow) fcSchedule([d.row], '3d');
+  else fcRerenderVisible('3d');
   return;
  }
  if (d.type === 'pan2d') {
-  fcSchedule([d.row]);
+  fcSchedule([d.row], d.view);
   return;
  }
  if (d.type === 'edit') {
@@ -9636,7 +9703,8 @@ const FC_HTML = `
    <button id="cqt-fc-stop" class="cqt-btn cqt-btn-danger cqt-sm cqt-none" style="display:none;" title="Dừng quét cloud (giữ phần đã nạp)">Dừng</button>
   </div>
   <div class="cqt-fc-head-actions">
-   <button id="cqt-fc-tools" class="cqt-btn cqt-btn-secondary cqt-sm" aria-pressed="false">Công cụ Toolbox</button>
+   <button id="cqt-fc-tools" class="cqt-btn cqt-btn-secondary cqt-sm" aria-pressed="false" aria-controls="cvat-quicktool-panel" title="Box, Ground, Track, QA và Cài đặt của Toolbox">Công cụ Toolbox</button>
+   <button id="cqt-fc-edit-limits" class="cqt-btn cqt-btn-secondary cqt-sm" aria-expanded="false" aria-controls="cqt-fc-limits">Limit theo class</button>
    <button id="cqt-fc-qc" class="cqt-btn cqt-btn-secondary cqt-sm">QA/QC</button>
    <button id="cqt-fc-theme" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Đổi giao diện Sáng (Light) / Tối (Dark)"></button>
    <button id="cqt-fc-undo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled title="Hoàn tác thao tác gần nhất (${OPTION_KEY}Z)">${ICONS.undo}<span>Undo</span></button>
@@ -9666,6 +9734,7 @@ const FC_HTML = `
   </div>
   <div id="cqt-fc-health-badges" class="cqt-hp-badges"></div>
  </div>
+ <div id="cqt-fc-limits" hidden></div>
  <details class="cqt-fc-disclosure">
  <summary>Hiển thị và điều khiển</summary>
  <div class="cqt-fc-bar">
@@ -9904,6 +9973,7 @@ function fcBindWindow(el) {
  on('cqt-fc-theme', toggleTheme);
  on('cqt-fc-close', closeFullControl);
  on('cqt-fc-tools', fcToggleTools);
+ on('cqt-fc-edit-limits', () => fcShowLimits($('cqt-fc-limits').hidden));
  on('cqt-fc-qc', () => openQCWorkspace());
  on('cqt-fc-focus-prev', () => fcStepFocus(-1));
  on('cqt-fc-focus-next', () => fcStepFocus(1));
@@ -10143,12 +10213,10 @@ function fcBindWindow(el) {
    setStatus('Đã đặt lại tâm và Zoom 3D (1.0x) về xe mục tiêu (giữ nguyên góc xoay).', 'info');
    return;
   }
-  if (canvas.dataset.view) {
-   delete canvas._pan;
-   fcSchedule([row]);
-  }
   if (hit?.kind === 'pitch' || hit?.kind === 'roll') {
    await fcFlattenRows(fcTargetsFor(row));
+  } else if (hit?.kind === 'pan2d') {
+   fcSetView2D(row, canvas.dataset.view, null);
   }
  }));
  list.addEventListener('mousemove', (e) => {
@@ -10167,42 +10235,57 @@ function fcBindWindow(el) {
    prev.hit.kind === next.hit.kind && prev.hit.face === next.hit.face;
   if (same || (!prev && !next)) return;
   fc.hover = next;
-  fcSchedule([prev?.row, next?.row]);
+  if (prev) fcSchedule([prev.row], prev.view);
+  if (next) fcSchedule([next.row], next.view);
  });
  list.addEventListener('mouseleave', () => {
   if (!fc.hover) return;
-  const row = fc.hover.row;
+  const { row, view } = fc.hover;
   fc.hover = null;
-  fcSchedule([row]);
+  fcSchedule([row], view);
  });
  list.addEventListener('wheel', (e) => {
-  const canvas3d = e.target.closest?.('canvas[data-view="3d"]');
-  if (canvas3d && (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey)) {
-   e.preventDefault();
-   const rowEl = canvas3d.closest('.cqt-fc-row');
-   const row = rowEl && fcRowByFrame(Number(rowEl.dataset.frame));
-   const factor = e.deltaY < 0 ? 1.14 : 1 / 1.14;
-   if (e.shiftKey && row) {
+  const canvas = e.target.closest?.('canvas[data-view]');
+  const focus = fcLayout() === 'focus';
+  const modified = e.altKey || e.ctrlKey || e.metaKey;
+  const view = canvas?.dataset.view;
+  const rowEl = canvas?.closest('.cqt-fc-row');
+  const row = rowEl && fcRowByFrame(Number(rowEl.dataset.frame));
+  if (!row || (!focus && !modified && !(view === '3d' && e.shiftKey)) || !e.deltaY) return;
+  e.preventDefault();
+  if (fc.drag) return;
+  const delta = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? canvas.clientHeight : 1);
+  const factor = 1.2 ** clamp(-delta / 100, -2, 2);
+  if (view === '3d') {
+   if (e.shiftKey || (focus && !modified)) {
     row.zoom3d = clamp((row.zoom3d ?? fc.cfg.zoom3d ?? 1) * factor, 0.4, 5);
-    fcSchedule([row]);
+    fcSchedule([row], '3d');
    } else {
     const nextZ = clamp((fc.cfg.zoom3d ?? 1) * factor, 0.4, 5);
     for (const r of fc.allRows) delete r.zoom3d;
-    saveFcSettings({ zoom3d: Math.round(nextZ * 100) / 100 });
-    fcRerenderVisible();
+    saveFcSettings({ zoom3d: nextZ });
+    fcRerenderVisible('3d');
    }
    return;
   }
-  if (!e.altKey && !e.ctrlKey && !e.metaKey) return;
-  e.preventDefault();
-  fcSetZoom(fc.cfg.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
+  const rect = canvas.getBoundingClientRect();
+  const { cx, cy, cw, ch, k } = fcViewGeom(canvas, view, row);
+  if (!k) return;
+  const zoom = row.view2d?.[view]?.zoom ?? 1;
+  const nextZoom = clamp(zoom * factor, 0.4, 5);
+  const nextK = k * nextZoom / zoom;
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  fcSetView2D(row, view, { zoom: nextZoom, pan: [(x - cw / 2) / nextK - (x - cx) / k,
+   (y - ch / 2) / nextK - (y - cy) / k] });
  }, { passive: false });
  list.addEventListener('click', guarded(async (e) => {
   const btn = e.target.closest('button[data-act]');
   const row = btn && fcRowByFrame(Number(btn.closest('.cqt-fc-row').dataset.frame));
   if (!row) return;
   const act = btn.dataset.act;
-  if (act === 'goto') {
+  if (act === 'reset-view') {
+   fcSetView2D(row, btn.closest('[data-view-cell]').dataset.viewCell, null);
+  } else if (act === 'goto') {
    await jumpTo(fc.targetId, row.frame);
    const pos = await cloudAtFrame(row.frame, null);
    if (pos) {
@@ -10270,6 +10353,7 @@ async function openFullControl(id) {
 
 function closeFullControl() {
  if (!fc.el) return;
+ fcShowLimits(false);
  if (fc.toolsOpen) void fcToggleTools();
  fc.open = false;
  fc.abort = true;
@@ -12705,35 +12789,45 @@ ${lidarGroundFields()}
 <p class="cqt-hint">Khi đang kéo: X/Y/Z khoá trục · số, dấu chấm/phẩy và dấu trừ để nhập số · Backspace xoá ký tự · Enter/click trái để áp · Esc/click phải để huỷ · Shift/Ctrl khi kéo để bắt bước.</p>
 <p class="cqt-hint">Trong Item: Enter áp target, ${OPTION_KEY}Enter áp nhóm. Shift/Cmd+click để chọn nhóm trên canvas.</p>
 </details>
-<div class="cqt-card">
-<span class="cqt-h">Limits LWH theo class</span>
+<div id="cqt-limit-home"><div id="cqt-limit-editor" class="cqt-card">
+<span class="cqt-h">Limit kích thước theo class (m)</span>
+<div class="cqt-limit-class-fields">
 <div class="cqt-row">
-<select id="cqt-limit-class" class="cqt-input"></select>
+<select id="cqt-limit-class" class="cqt-input" aria-label="Class có Limit"></select>
 <button id="cqt-btn-limit-delete" class="cqt-btn cqt-btn-danger cqt-sm cqt-none">Xoá</button>
 </div>
 <div class="cqt-row">
-<input id="cqt-limit-class-name" class="cqt-input" placeholder="Class mới (trống = class đang chọn)" />
+<input id="cqt-limit-class-name" class="cqt-input" aria-label="Tên class mới" placeholder="Class mới (trống = class đang chọn)" />
 <button id="cqt-btn-limit-from-object" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Lấy label của object đang chọn">Lấy từ Box</button>
 </div>
-<div class="cqt-row"><span class="cqt-label" style="width:14px;">L</span><input type="number" step="0.01" id="cqt-limit-l-min" class="cqt-input" placeholder="min" /><input type="number" step="0.01" id="cqt-limit-l-max" class="cqt-input" placeholder="max" /></div>
-<div class="cqt-row"><span class="cqt-label" style="width:14px;">W</span><input type="number" step="0.01" id="cqt-limit-w-min" class="cqt-input" placeholder="min" /><input type="number" step="0.01" id="cqt-limit-w-max" class="cqt-input" placeholder="max" /></div>
-<div class="cqt-row"><span class="cqt-label" style="width:14px;">H</span><input type="number" step="0.01" id="cqt-limit-h-min" class="cqt-input" placeholder="min" /><input type="number" step="0.01" id="cqt-limit-h-max" class="cqt-input" placeholder="max" /></div>
+</div>
+<div class="cqt-limit-dims">
+${['L', 'W', 'H'].map((axis) => `<div class="cqt-row"><span class="cqt-label">${axis}</span>${['min', 'max'].map((bound) =>
+ `<input type="number" step="0.01" id="cqt-limit-${axis.toLowerCase()}-${bound}" class="cqt-input" aria-label="${axis} ${bound}" placeholder="${bound}" />`).join('')}</div>`).join('')}
+</div>
+<div class="cqt-limit-actions">
 <div class="cqt-row">
 <button id="cqt-btn-limit-save" class="cqt-btn cqt-btn-primary cqt-sm">Lưu limits</button>
 <button id="cqt-btn-limit-reset" class="cqt-btn cqt-btn-secondary cqt-sm">Mặc định</button>
 </div>
 <label class="cqt-check"><input type="checkbox" id="cqt-limit-clamp-on-apply" /> Ép theo limits khi Áp dụng LWH / auto-fix</label>
-<div class="cqt-divider"></div>
+</div>
+<div class="cqt-limit-scope">
 <div class="cqt-row" style="justify-content:space-between;">
 <label class="cqt-check"><input type="checkbox" id="cqt-limit-class-all-job" checked /> Toàn job</label>
 <label class="cqt-check"><input type="checkbox" id="cqt-limit-class-keyframes" checked /> Chỉ keyframe</label>
+</div>
+<div class="cqt-row cqt-fc-limit-range">
+<label>Dải từ <input type="number" id="cqt-fc-limit-start" class="cqt-input" /></label>
+<label>đến <input type="number" id="cqt-fc-limit-end" class="cqt-input" /></label>
 </div>
 <div class="cqt-row">
 <button id="cqt-btn-limit-check-class" class="cqt-btn cqt-btn-secondary cqt-sm">Check class</button>
 <button id="cqt-btn-limit-clamp-class" class="cqt-btn cqt-btn-primary cqt-sm">Clamp class</button>
 </div>
-<pre id="cqt-limit-result" class="cqt-log">Chưa kiểm tra class.</pre>
 </div>
+<pre id="cqt-limit-result" class="cqt-log">Chưa kiểm tra class.</pre>
+</div></div>
 </div>
 </div>
 <div id="cqt-status" class="cqt-status" role="status">Đang khởi tạo...</div>

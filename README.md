@@ -2,6 +2,8 @@
 
 Cuboid Toolbox được tích hợp vào giao diện CVAT Community **v2.76.0** cho job 3D LiDAR. Tool có Full Control, QA/QC, Fit Ground theo point cloud, gốc LiDAR hoặc Anchor và hai HUD có thể kéo độc lập.
 
+Trong **Full Control**, mở **Limit theo class** để chỉnh ngưỡng L/W/H, kiểm tra và gọt theo class. Nút **Công cụ Toolbox** mở các tab Box, Ground, Track, QA và Cài đặt ngay cạnh bảng. Chế độ **Đầy đủ điểm** giữ point cloud của frame đã nạp khi xoay, kéo nền hoặc di chuyển cuboid. Trong **Frame lớn**, lăn chuột để zoom từng góc chiếu, kéo nền để dịch và bấm nút tâm để căn lại.
+
 ## Build giao diện Toolbox
 
 Cần Git, Docker Engine hoặc Docker Desktop, và Docker Compose v2. Chạy các lệnh này trên máy chạy CVAT để Docker build image phù hợp với kiến trúc của máy.

@@ -337,6 +337,69 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
     height: auto;
 }
 
+#cvat-cuboid-toolbox .cqt-fc-reset-view {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    opacity: 0;
+    padding-inline: 5px;
+}
+
+#cvat-cuboid-toolbox .cqt-fc-view:hover .cqt-fc-reset-view,
+#cvat-cuboid-toolbox .cqt-fc-reset-view:focus-visible {
+    opacity: 1;
+}
+
+#cvat-cuboid-toolbox #cqt-fc-limits {
+    flex: none;
+    max-height: min(38vh, 275px);
+    overflow: auto;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--cqt-border);
+}
+
+#cvat-cuboid-toolbox #cqt-fc-limits #cqt-limit-editor {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
+    align-items: start;
+    gap: 8px 12px;
+}
+
+#cvat-cuboid-toolbox #cqt-limit-editor > div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 6px;
+}
+
+#cvat-cuboid-toolbox #cqt-limit-editor .cqt-input {
+    min-width: 0;
+}
+
+#cvat-cuboid-toolbox .cqt-limit-dims .cqt-label {
+    flex: 0 0 14px;
+}
+
+#cvat-cuboid-toolbox #cqt-fc-limits :is(.cqt-h, .cqt-log) {
+    grid-column: 1 / -1;
+}
+
+#cvat-cuboid-toolbox .cqt-fc-limit-range {
+    display: none;
+}
+
+#cvat-cuboid-toolbox #cqt-fc-limits .cqt-limit-scope:not(:has(#cqt-limit-class-all-job:checked)) .cqt-fc-limit-range {
+    display: flex;
+}
+
+#cvat-cuboid-toolbox .cqt-fc-limit-range label {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
 #cvat-cuboid-toolbox.cqt-fc-tools-open #cvat-quicktool-wrapper {
     z-index: 1000005;
 }
