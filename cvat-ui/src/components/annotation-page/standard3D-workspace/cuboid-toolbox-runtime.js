@@ -6899,9 +6899,9 @@ function onKeyDown(e) {
   }
   return;
  }
- if (e.target === launcher && ['Enter', ' '].includes(e.key)) {
+ if (['Enter', ' '].includes(e.key) && (e.target === launcher || e.target === $('cqt-sidebar-rail'))) {
   swallow(e);
-  if (!e.repeat) togglePanel();
+  if (!e.repeat) e.target.click();
   return;
  }
  if (e.key === 'Escape') transformRequest++;
