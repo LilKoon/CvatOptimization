@@ -8,6 +8,8 @@ Chọn **3D lớn** để cuộn qua các frame nối tiếp. Mỗi frame có kh
 
 Trong **3D lớn**, nếu chỉ hiển thị một frame, các khung nhìn lấp đầy chiều cao còn lại. Khi hiển thị nhiều frame, mỗi hàng giữ kích thước gọn để cuộn qua track. Ô **Object ID** nhận số nguyên từ 1 trở lên.
 
+Rê chuột hoặc bấm **Thanh công cụ** để hiện bộ lọc, các bố cục và nhóm thao tác. Thanh tự thu khi rời chuột, trả lại chỗ cho khung nhìn. Bấm biểu tượng **Ghim** để giữ thanh mở. Full Control ghi nhớ lựa chọn này khi mở lại.
+
 ## Build giao diện Toolbox
 
 Cần Git, Docker Engine hoặc Docker Desktop, và Docker Compose v2. Chạy các lệnh này trên máy chạy CVAT để Docker build image phù hợp với kiến trúc của máy.

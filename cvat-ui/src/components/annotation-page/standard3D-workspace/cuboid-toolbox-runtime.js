@@ -82,7 +82,7 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '4.8.2';
+const VERSION = '4.8.3';
 const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
@@ -111,6 +111,7 @@ const ICONS = {
  check: svgIcon('<path d="M20 6 9 17l-5-5"/>'),
  alert: svgIcon('<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>'),
  chevronDown: svgIcon('<path d="m6 9 6 6 6-6"/>', 11),
+ pin: svgIcon('<path d="M12 17v5M9 3h6l-1 6 4 4v4H6v-4l4-4-1-6Z"/>'),
  grip: svgIcon('<circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/>', 11),
  sliders: svgIcon('<line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y2="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/>'),
  undo: svgIcon('<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>'),
@@ -6931,7 +6932,11 @@ function runGroundFitShortcut(kind) {
  const field = fullControl ? 'cqt-fc-ground-kind' : 'cqt-ground-kind';
  setField(field, kind);
  syncGroundFitControls(fullControl);
- if (fullControl) $('cqt-fc-ground-controls').open = true;
+ if (fullControl) {
+  fcSetToolbar(true);
+  $('cqt-fc-ground-controls').open = true;
+  fcQueueToolbarCollapse();
+ }
  return runGroundFit(kind, { fullControl });
 }
 
@@ -6954,7 +6959,8 @@ function onKeyDown(e) {
   }
   return;
  }
- if (['Enter', ' '].includes(e.key) && e.target === $('cqt-sidebar-rail')) {
+ if (['Enter', ' '].includes(e.key) &&
+     ['cqt-sidebar-rail', 'cqt-fc-toolbar-toggle', 'cqt-fc-toolbar-pin'].includes(e.target?.id)) {
   swallow(e);
   if (!e.repeat) e.target.click();
   return;
@@ -7116,6 +7122,7 @@ const FC_YAW_HANDLE_PX = 14;
 const FC_VIEWS = ['top', 'side', 'front', '3d'];
 const FC_DEFAULTS = {
  maximized: true, x: 60, y: 50, w: 1280, h: 760,
+ toolbarPinned: false,
  rowH: 155, zoom: 1, filter: 'all', fillMode: 'lwh', anchor: 'center',
  slice: 'tight', show3d: true, scene3d: true, fullSceneDetail: true, zoom3d: 1,
  live3d: false, liveSplitMode: 'bottom', liveSplitY: 0, liveSplitX: 0,
@@ -7181,6 +7188,7 @@ const fc = {
  focusFrame: null,
  healthStats: null,
  toolsOpen: false,
+ toolbarTimer: 0,
  selected: new Set(), // frame
  lastClicked: null,
  harvesting: false,
@@ -7684,6 +7692,7 @@ function fcShowLimits(open) {
  const slot = $('cqt-fc-limits');
  const editor = $('cqt-limit-editor');
  if (!slot || !editor || slot.hidden === !open) return;
+ if (open) fcSetToolbar(true);
  slot.hidden = !open;
  $('cqt-fc-edit-limits').setAttribute('aria-expanded', String(open));
  (open ? slot : $('cqt-limit-home')).appendChild(editor);
@@ -9715,11 +9724,14 @@ function fcCancelDrag() {
 // ---- Cửa sổ ----
 const FC_HTML = `
  ${['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map((dir) => `<div class="cqt-fc-resizer" data-dir="${dir}"></div>`).join('')}
+ <div class="cqt-fc-header" id="cqt-fc-header">
  <div class="cqt-fc-head" id="cqt-fc-head" title="Kéo để di chuyển · Nhấp đúp để phóng to / thu nhỏ">
   <div class="cqt-fc-title">
    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
    <span>Full Control</span>
    <span class="cqt-badge">v${VERSION}</span>
+   <button type="button" id="cqt-fc-toolbar-toggle" class="cqt-btn cqt-btn-secondary cqt-sm" aria-expanded="false" aria-controls="cqt-fc-toolbar" title="Rê chuột hoặc bấm để mở thanh công cụ">Thanh công cụ${ICONS.chevronDown}</button>
+   <button type="button" id="cqt-fc-toolbar-pin" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" aria-label="Ghim thanh công cụ" aria-pressed="false" aria-controls="cqt-fc-toolbar" title="Ghim thanh công cụ">${ICONS.pin}</button>
   </div>
   <div class="cqt-fc-head-tools">
    <span class="cqt-label">Object</span>
@@ -9746,6 +9758,7 @@ const FC_HTML = `
   </div>
  </div>
 
+ <div id="cqt-fc-toolbar" class="cqt-fc-toolbar" hidden>
  <div class="cqt-fc-bar">
   <div class="cqt-fc-seg">
    <button data-fc-filter="all">Tất cả <span data-count="all">0</span></button>
@@ -9868,6 +9881,8 @@ const FC_HTML = `
   </div>
   <div id="cqt-fc-ground-result" class="cqt-ground-result" role="status" hidden></div>
  </details>
+ </div>
+ </div>
 
  <div class="cqt-fc-grid">
  <div class="cqt-fc-cols">
@@ -9981,12 +9996,67 @@ function fcSetZoom(z) {
  fcRerenderVisible();
 }
 
+function fcSetToolbar(open) {
+ const toolbar = $('cqt-fc-toolbar');
+ const toggle = $('cqt-fc-toolbar-toggle');
+ const pin = $('cqt-fc-toolbar-pin');
+ const pinned = fc.cfg.toolbarPinned;
+ clearTimeout(fc.toolbarTimer);
+ if (!open && toolbar.contains(document.activeElement)) toggle.focus({ preventScroll: true });
+ toolbar.hidden = !open;
+ toggle.setAttribute('aria-expanded', String(open));
+ toggle.title = open ? 'Thu thanh công cụ' : 'Rê chuột hoặc bấm để mở thanh công cụ';
+ pin.setAttribute('aria-pressed', String(pinned));
+ pin.title = pinned ? 'Bỏ ghim để tự thu khi rời chuột' : 'Ghim thanh công cụ để giữ mở';
+}
+
+function fcQueueToolbarCollapse(touch = false) {
+ clearTimeout(fc.toolbarTimer);
+ if (!fc.open || fc.cfg.toolbarPinned || $('cqt-fc-toolbar').hidden) return;
+ fc.toolbarTimer = setTimeout(() => {
+  const header = $('cqt-fc-header');
+  const focus = document.activeElement;
+  if (fc.drag || (!touch && header.matches(':hover'))) return;
+  if (!touch && header.contains(focus) && focus.matches('input, select, textarea, :focus-visible')) return;
+  fcSetToolbar(false);
+ }, 350);
+}
+
 function fcBindWindow(el) {
  const on = (id, fn, event = 'click') => el.querySelector('#' + id)?.addEventListener(event, guarded(fn));
  const list = el.querySelector('#cqt-fc-list');
 
  el.querySelectorAll('.cqt-fc-resizer').forEach((r) => r.addEventListener('mousedown', (e) => fcStartResize(e, r.dataset.dir)));
  const head = el.querySelector('#cqt-fc-head');
+ const header = el.querySelector('#cqt-fc-header');
+ const toolbar = el.querySelector('#cqt-fc-toolbar');
+ const toggle = el.querySelector('#cqt-fc-toolbar-toggle');
+ toggle.addEventListener('pointerenter', (e) => {
+  if (e.pointerType === 'touch' || e.buttons || !toolbar.hidden) return;
+  clearTimeout(fc.toolbarTimer);
+  fc.toolbarTimer = setTimeout(() => {
+   if (toggle.matches(':hover') && !fc.drag) fcSetToolbar(true);
+  }, 140);
+ });
+ header.addEventListener('pointerenter', () => clearTimeout(fc.toolbarTimer));
+ header.addEventListener('pointerleave', (e) => {
+  if (e.pointerType !== 'touch') fcQueueToolbarCollapse();
+ });
+ header.addEventListener('focusout', (e) => {
+  if (!header.contains(e.relatedTarget)) fcQueueToolbarCollapse();
+ });
+ listen(document, 'pointerup', (e) => {
+  if (!header.contains(e.target)) fcQueueToolbarCollapse(e.pointerType === 'touch');
+ });
+ on('cqt-fc-toolbar-toggle', () => {
+  if (fc.cfg.toolbarPinned) saveFcSettings({ toolbarPinned: false });
+  fcSetToolbar(toolbar.hidden);
+ });
+ on('cqt-fc-toolbar-pin', () => {
+  saveFcSettings({ toolbarPinned: !fc.cfg.toolbarPinned });
+  fcSetToolbar(true);
+  fcQueueToolbarCollapse();
+ });
  const isControl = (t) => t.closest('button, input, select, label, .cqt-fc-progress');
  head.addEventListener('mousedown', (e) => {
   if (e.button === 0 && !isControl(e.target)) fcStartMoveWindow(e);
@@ -10348,6 +10418,7 @@ function fcBindWindow(el) {
   } else if (act === 'ground') {
    fc.focusFrame = row.frame;
    fc.lastClicked = row.frame;
+   fcSetToolbar(true);
    $('cqt-fc-ground-controls').open = true;
    $('cqt-fc-ground-kind').focus();
   } else if (act === 'flat') {
@@ -10378,6 +10449,7 @@ async function openFullControl(id) {
  fcEnsureWindow();
  fc.open = true;
  fc.el.style.display = 'flex';
+ fcSetToolbar(fc.cfg.toolbarPinned);
  fcApplyBounds();
  fcSyncControls();
  const target = Number.isInteger(id) ? id : resolveTargetId();
@@ -10396,6 +10468,7 @@ function closeFullControl() {
  fcShowLimits(false);
  if (fc.toolsOpen) void fcToggleTools();
  fc.open = false;
+ clearTimeout(fc.toolbarTimer);
  fc.abort = true;
  fcCancelDrag();
  fc.hover = null;
