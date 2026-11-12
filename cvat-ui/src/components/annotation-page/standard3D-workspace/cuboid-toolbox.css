@@ -1,9 +1,9 @@
 /* Workspace layout overrides for the v4.7 toolbox. */
 #cvat-cuboid-toolbox #cvat-quicktool-wrapper {
-    top: 106px;
-    right: 12px;
-    bottom: 12px;
-    width: min(382px, calc(100vw - 24px));
+    top: var(--cqt-sidebar-top, 106px);
+    right: 0;
+    bottom: 8px;
+    width: min(382px, calc(100vw - 16px));
     flex-direction: column;
     align-items: flex-end;
     gap: 6px;
@@ -32,15 +32,31 @@
     min-height: 0;
     max-height: 100%;
     border: 1px solid var(--cqt-border);
-    border-radius: 8px;
+    border-radius: 8px 0 0 8px;
     pointer-events: auto;
 }
 
-#cvat-cuboid-toolbox #cvat-quicktool-wrapper.pinned #cvat-quicktool-panel {
+#cvat-cuboid-toolbox #cvat-quicktool-wrapper.is-open #cvat-quicktool-panel {
     display: flex;
 }
 
+#cvat-cuboid-toolbox #cqt-sidebar-rail {
+    margin-top: 12px;
+    padding: 12px 6px;
+    writing-mode: vertical-rl;
+    font: inherit;
+    font-weight: 600;
+    color: var(--cqt-text);
+    background: var(--cqt-bg-elev);
+    border: 1px solid var(--cqt-border-btn);
+    border-right: 0;
+    border-radius: 6px 0 0 6px;
+    cursor: pointer;
+    pointer-events: auto;
+}
+
 #cvat-cuboid-toolbox #cvat-quicktool-header {
+    cursor: default;
     flex-wrap: wrap;
     gap: 5px;
 }
@@ -327,4 +343,44 @@
 
 #cvat-cuboid-toolbox #cqt-qc-totals {
     margin-inline-start: auto;
+}
+
+
+#cvat-cuboid-toolbox .cqt-ground-controls {
+    align-items: end;
+}
+
+#cvat-cuboid-toolbox .cqt-ground-controls .cqt-col {
+    flex: 1 1 120px;
+}
+
+#cvat-cuboid-toolbox #cqt-fc-ground-kind,
+#cvat-cuboid-toolbox #cqt-ground-kind {
+    min-width: 0;
+}
+
+#cvat-cuboid-toolbox .cqt-ground-controls > label:first-child {
+    flex-basis: 180px;
+}
+
+#cvat-cuboid-toolbox .cqt-ground-result {
+    display: grid;
+    gap: 6px;
+    padding: 8px;
+    max-height: 140px;
+    overflow-y: auto;
+    border: 1px solid var(--cqt-border);
+    border-radius: 5px;
+    color: var(--cqt-text-sec);
+    background: var(--cqt-bg-input);
+}
+
+#cvat-cuboid-toolbox .cqt-ground-result[hidden],
+#cvat-cuboid-toolbox .cqt-ground-controls [hidden],
+#cvat-cuboid-toolbox .cqt-ground-controls[hidden] {
+    display: none;
+}
+
+#cvat-cuboid-toolbox .cqt-fc-ground > :is(.cqt-ground-controls, .cqt-ground-result) {
+    margin: 0 12px 8px;
 }

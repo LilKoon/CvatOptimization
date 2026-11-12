@@ -86,6 +86,7 @@ const LOG = '[CVAT-Toolbox]';
 const VERSION = '4.7.0';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
+const FIT_SIZE_HINT = 'Dùng cho Smart Snap. Bật để đo lại chiều dài, rộng và cao từ cụm điểm. Tắt để giữ kích thước hiện tại.';
 const KEY_PREFIX = IS_MAC ? '⌥⇧Q → ' : 'Alt+Shift+Q → ';
 
 // Bộ icon vector chuẩn shadcn/ui (Lucide SVG, stroke 1.75px, currentColor)
@@ -1108,7 +1109,7 @@ function setStatus(msg, type = '', opts = {}) {
   fcEl.className = 'cqt-fc-status ' + (type || 'info');
  }
  const w = $('cvat-quicktool-wrapper');
- const panelVisible = !stealthUI && w && (w.classList.contains('pinned') || w.classList.contains('hover-open'));
+ const panelVisible = !stealthUI && w?.classList.contains('is-open');
  const fromKey = Date.now() - activeKeyTime < 3500 && activeKeyBadge;
  if (!opts.silentToast && clean && (stealthUI || fromKey || (!panelVisible && !fc.open && type))) {
   showToast(clean, type || 'info', fromKey ? activeKeyBadge : '');
@@ -1271,11 +1272,11 @@ function refreshSnapshotList() {
  const list = snapshots.map((s, i) => ({ s, i })).filter(({ s }) => s.jobId === jobId);
  const redoList = redoStack.filter((s) => s.jobId === jobId);
  const undoTitle = list.length
-  ? `Hoàn tác: "${list[0].s.label}" (${list[0].s.items.length} mục) — Phím ${KEY_PREFIX}Z`
-  : `Chưa có thao tác để hoàn tác (${KEY_PREFIX}Z)`;
+  ? `Hoàn tác: "${list[0].s.label}" (${list[0].s.items.length} mục) — Phím ${OPTION_KEY}Z`
+  : `Chưa có thao tác để hoàn tác (${OPTION_KEY}Z)`;
  const redoTitle = redoList.length
-  ? `Làm lại: "${redoList[0].label}" (${redoList[0].items.length} mục) — Phím ${KEY_PREFIX}${IS_MAC ? '⇧Z' : 'Shift+Z'}`
-  : `Chưa có thao tác để làm lại (${KEY_PREFIX}${IS_MAC ? '⇧Z' : 'Shift+Z'})`;
+  ? `Làm lại: "${redoList[0].label}" (${redoList[0].items.length} mục) — Phím ${OPTION_KEY}${IS_MAC ? '⇧Z' : 'Shift+Z'}`
+  : `Chưa có thao tác để làm lại (${OPTION_KEY}${IS_MAC ? '⇧Z' : 'Shift+Z'})`;
  if (quickUndoBtn) {
   quickUndoBtn.disabled = !list.length;
   quickUndoBtn.title = undoTitle;
@@ -1598,7 +1599,7 @@ async function calcGroundPlane() {
  }
  if (plane) {
   setGroundPlane(plane, `cloud quanh #${id} @f${frame}`, s.points);
-  setStatus(`📐 Đã tính plane dốc ${plane.slopeDeg.toFixed(1)}° từ ${plane.count} điểm. Bấm "Fit Frame này" hoặc "Fit dải".`, 'success');
+  setStatus(`📐 Đã tính plane dốc ${plane.slopeDeg.toFixed(1)}° từ ${plane.count} điểm. Dùng "Áp mặt phẳng đã lưu" để fit.`, 'success');
   return plane;
  }
  if (isChecked('cqt-ground-auto-fallback')) {
@@ -1690,15 +1691,13 @@ function renderAnchorChips() {
  if (!box) return;
  const ids = getExplicitAnchorIds();
  if (!ids.length) {
-  box.innerHTML = `<span class="cqt-hint">Chưa ghim Anchor — trỏ chuột vào xe chuẩn trên màn 3D bấm <span class="cqt-kbd">${KEY_PREFIX}B</span> để chọn nhanh.</span>`;
-  const missBox = $('cqt-anchor-missing-box');
-  if (missBox) missBox.style.display = 'none';
+  box.innerHTML = `<span class="cqt-hint">Chưa ghim Anchor — trỏ chuột vào xe chuẩn trên màn 3D bấm <span class="cqt-kbd">${OPTION_KEY}B</span> để chọn nhanh.</span>`;
   return;
  }
  box.innerHTML = ids
   .map(
    (id, idx) =>
-    `<span class="cqt-anchor-chip" title="Anchor ưu tiên #${idx + 1}: Object #${id} (Bấm tên để Focus, bấm × hoặc ${KEY_PREFIX}B để gỡ)">` +
+    `<span class="cqt-anchor-chip" title="Anchor ưu tiên #${idx + 1}: Object #${id} (Bấm tên để Focus, bấm × hoặc ${OPTION_KEY}B để gỡ)">` +
     `<span class="cqt-anchor-chip-lbl" data-anchor-focus="${id}">${ICONS.anchor}#${id}</span>` +
     `<button class="cqt-anchor-chip-x" data-anchor-rm="${id}" title="Xoá #${id} khỏi Anchor">&times;</button>` +
     `</span>`
@@ -1715,7 +1714,12 @@ function parseReferenceBoxIds(value) {
 
 function setReferenceBoxIds(ids) {
  const clean = [...new Set((ids || []).filter((x) => Number.isInteger(x) && x > 0))];
- setField('cqt-ground-ref-ids', clean.join(', '));
+ const formatted = clean.join(', ');
+ setField('cqt-ground-ref-ids', formatted);
+ setField('cqt-fc-ground-anchor-ids', formatted);
+ for (const prefix of ['cqt-ground-', 'cqt-fc-ground-']) {
+  if (val(prefix + 'kind') === 'anchor-range') renderGroundMissing($(prefix + 'result'), new Set(), []);
+ }
  renderAnchorChips();
  invalidateHealthCache();
  guarded(async () => {
@@ -1741,7 +1745,7 @@ async function toggleAnchorById(id) {
   ids.push(id);
   setReferenceBoxIds(ids);
   setStatus(
-   `Đã ghim #${id} làm Mốc mặt đất (Anchor: ${ids.map((x) => '#' + x).join(' → ')}). Bấm ${KEY_PREFIX}B lần nữa để gỡ hoặc ${KEY_PREFIX}${IS_MAC ? '⇧B' : 'Shift+B'} xoá hết.`,
+   `Đã ghim #${id} làm Mốc mặt đất (Anchor: ${ids.map((x) => '#' + x).join(' → ')}). Bấm ${OPTION_KEY}B lần nữa để gỡ hoặc ${OPTION_KEY}${IS_MAC ? '⇧B' : 'Shift+B'} xoá hết.`,
    'success'
   );
  }
@@ -1757,7 +1761,7 @@ async function toggleAnchorUnderPointer() {
   id = activeId() ?? resolveTargetId();
  }
  if (!Number.isInteger(id)) {
-  return fail(`Hãy trỏ chuột vào 1 cuboid trên màn 3D (hoặc chọn cuboid) rồi bấm ${KEY_PREFIX}B để chọn/bỏ làm Anchor.`);
+  return fail(`Hãy trỏ chuột vào 1 cuboid trên màn 3D (hoặc chọn cuboid) rồi bấm ${OPTION_KEY}B để chọn/bỏ làm Anchor.`);
  }
  return toggleAnchorById(id);
 }
@@ -1766,8 +1770,6 @@ async function toggleAnchorUnderPointer() {
 function clearAllAnchors() {
  const ids = getExplicitAnchorIds();
  setReferenceBoxIds([]);
- const missBox = $('cqt-anchor-missing-box');
- if (missBox) missBox.style.display = 'none';
  setStatus(
   ids.length
    ? `Đã xoá toàn bộ ${ids.length} Anchor mặt đất (${ids.map((x) => '#' + x).join(', ')}).`
@@ -1776,32 +1778,34 @@ function clearAllAnchors() {
  );
 }
 
-function renderAnchorMissingBox(missingFrames, fallbackFrames, refIds) {
- const box = $('cqt-anchor-missing-box');
+function renderGroundMissing(box, missing, refIds) {
  if (!box) return;
- const allMissing = [...new Set([...(missingFrames || []), ...(fallbackFrames || [])])].sort((a, b) => a - b);
- if (!allMissing.length) {
-  box.style.display = 'none';
-  box.innerHTML = '';
-  return;
- }
- const ranges = formatFrameRanges(allMissing);
- const anchorTxt = refIds.map((x) => '#' + x).join(' → ');
- const btns = ranges
-  .slice(0, 8)
-  .map(
-   (rg) =>
-    `<button class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" data-anchor-jump="${rg.from}" title="Nhảy tới Frame ${rg.from} để kiểm tra hoặc chọn thêm Anchor kế nhiệm">${rg.text}</button>`
-  )
-  .join('');
- box.style.display = 'flex';
- box.innerHTML =
-  `<div class="cqt-row" style="justify-content:space-between;">` +
-  `<span style="color:#c084fc;font-weight:600;">${ICONS.alert} Thiếu Anchor (${anchorTxt}) tại ${allMissing.length} frame:</span>` +
-  `<span class="cqt-label">${fallbackFrames?.length ? `Đã kế thừa ${fallbackFrames.length}F` : `Bỏ qua ${missingFrames.length}F`}</span>` +
-  `</div>` +
-  `<div class="cqt-row cqt-wrap" style="gap:4px;">${btns}</div>` +
-  `<div class="cqt-hint">Bấm nút dải Frame ở trên để nhảy tới chỗ mất Anchor, trỏ xe chuẩn khác rồi bấm <b>${KEY_PREFIX}B</b> để nối vào chuỗi Anchor.</div>`;
+ box.hidden = !missing.size;
+ const ranges = formatFrameRanges([...missing]);
+ const source = refIds.length ? `Anchor ${refIds.map((id) => '#' + id).join(' → ')}` : 'dữ liệu mặt đất';
+ box.innerHTML = missing.size ? `
+  <span>Thiếu ${source} tại ${missing.size} frame. Bấm số frame để kiểm tra.</span>
+  <div class="cqt-row cqt-wrap">
+   ${ranges.map(({ from, text }) =>
+    `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${from}">${text}</button>`).join('')}
+  </div>` : '';
+}
+
+function bindGroundMissing(box, fullControl = false) {
+ box.addEventListener('click', guarded(async (e) => {
+  const button = e.target.closest('[data-ground-jump]');
+  if (!button) return;
+  const frame = Number(button.dataset.groundJump);
+  if (!(await goToFrame(frame))) return;
+  if (fullControl && fcRowByFrame(frame)) {
+   fc.focusFrame = frame;
+   fc.lastClicked = frame;
+   fcRenderList();
+   fcRowByFrame(frame)?.el?.scrollIntoView({ block: 'nearest' });
+  } else {
+   await dockTick(true);
+  }
+ }));
 }
 
 async function groundFromReferenceBoxes() {
@@ -1988,259 +1992,227 @@ function lidarGroundPlane(positions, options) {
  return plane ? { ...plane, origin } : null;
 }
 
-async function applyGroundFitCurrent(useLidarOrigin = false) {
- const ids = selectedOrTarget();
- if (!ids.length) return fail('Chọn object trước!');
- const lidar = useLidarOrigin ? lidarGroundOptions() : null;
- if (useLidarOrigin && !lidar) return;
- if (useLidarOrigin && annotationState()?.player.frame.fetching) return fail('Đang tải point cloud của frame.');
- const plane = useLidarOrigin
-  ? lidarGroundPlane(getPointCloudPositions(), lidar)
-  : await ensureGroundPlane();
- if (!plane) {
-  if (useLidarOrigin) fail('Không đủ điểm mặt đường quanh gốc LiDAR. Kiểm tra X/Y hoặc bán kính lấy mẫu.');
-  return;
+const GROUND_FIT_CHOICES = {
+ 'cloud-frame': 'Mặt Point Cloud · frame',
+ 'cloud-range': 'Mặt Point Cloud · dải',
+ 'lidar-frame': 'Gốc LiDAR · frame',
+ 'lidar-range': 'Gốc LiDAR · dải',
+ 'anchor-range': 'Anchor · dải',
+};
+const GROUND_FIT_MODES = {
+ snap: 'Snap đáy (giữ nghiêng)',
+ flat: 'Đặt phẳng (rx=ry=0)',
+ tilt: 'Nghiêng theo dốc',
+};
+const GROUND_FIT_DIRECTIONS = { both: 'Cả hai', down: 'Chỉ hạ', up: 'Chỉ nâng' };
+const LIDAR_GROUND_FIELDS = {
+ 'origin-x': { label: 'X (m)', step: '0.01', placeholder: 'Tự động', setting: 'lidarOriginX' },
+ 'origin-y': { label: 'Y (m)', step: '0.01', placeholder: 'Tự động', setting: 'lidarOriginY' },
+ 'ground-radius': { label: 'Bán kính (m)', step: '0.5', limits: 'min="3" max="12"', setting: 'lidarGroundRadius' },
+};
+
+function lidarGroundFields(prefix = '') {
+ return Object.entries(LIDAR_GROUND_FIELDS).map(([key, field]) => `
+  <label class="cqt-col"><span class="cqt-label">${field.label}</span>
+   <input id="cqt-${prefix}lidar-${key}" type="number" step="${field.step}"
+    ${field.limits || ''} placeholder="${field.placeholder || ''}" class="cqt-input" />
+  </label>`).join('');
+}
+
+function syncLidarGroundFields() {
+ const settings = getSettings();
+ for (const [key, { setting }] of Object.entries(LIDAR_GROUND_FIELDS)) {
+  const value = settings[setting] ?? (key === 'ground-radius' ? '6' : '');
+  setField(`cqt-lidar-${key}`, value);
+  setField(`cqt-fc-lidar-${key}`, value);
  }
- const frame = getFrame();
- if (!Number.isInteger(frame)) return fail('Không đọc được frame hiện tại.');
+}
 
- const mode = val('cqt-ground-mode') || 'snap';
- const direction = val('cqt-ground-direction') || 'both';
+function bindLidarGroundFields(on, prefix = '') {
+ for (const [key, { setting }] of Object.entries(LIDAR_GROUND_FIELDS)) {
+  on(`cqt-${prefix}lidar-${key}`, (event) => {
+   lsSet(LS.settings, { ...getSettings(), [setting]: event.target.value });
+   syncLidarGroundFields();
+  }, 'change');
+ }
+ syncLidarGroundFields();
+}
+let groundFitting = false;
 
- const source = useLidarOrigin ? 'mặt đất gốc LiDAR' : 'mặt đất';
- const batch = createBatch(`Fit ${source} frame hiện tại`);
- let minDz = Infinity, maxDz = -Infinity;
- let noPlane = 0;
- for (const id of ids) {
-  const s = await getState(id, frame);
-  if (!isCuboid(s) || s.outside) continue;
-  // Box xa chỗ đo plane (nhóm rải rác trên dốc) => đo mặt đất cục bộ dưới chính box đó
-  const pl = useLidarOrigin ? plane : (planeForFrame(frame, s.points) || planeFromCloud(s.points));
-  if (!pl) { noPlane++; continue; }
-  await batch.edit(s, frame, (st) => {
-   const after = fitToGround(st.points, pl, mode);
-   const dz = after[2] - st.points[2];
-   const rotChanged = Math.abs(after[3] - st.points[3]) > 1e-6 || Math.abs(after[4] - st.points[4]) > 1e-6;
-   if (Math.abs(dz) < 1e-4 && !rotChanged) return false;
-   if ((direction === 'down' && dz > 0) || (direction === 'up' && dz < 0)) return false;
-   st.points = after;
-   minDz = Math.min(minDz, dz);
-   maxDz = Math.max(maxDz, dz);
-   return true;
+function groundFitSelect(id, label, choices) {
+ return `<label class="cqt-col"><span class="cqt-label">${label}</span><select id="${id}" class="cqt-input">${
+  Object.entries(choices).map(([value, text]) => `<option value="${value}">${text}</option>`).join('')
+ }</select></label>`;
+}
+
+function syncGroundFitControls(fullControl) {
+ const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
+ const kind = val(prefix + 'kind');
+ const anchor = kind === 'anchor-range';
+ if (fullControl) {
+  $(prefix + 'scope').disabled = !kind.endsWith('-range');
+  $(prefix + 'anchor-field').hidden = !anchor;
+  $(prefix + 'lidar-fields').hidden = !kind.startsWith('lidar');
+  setField(prefix + 'anchor-ids', getExplicitAnchorIds().join(', '));
+ } else {
+  $(prefix + 'anchor-hint').hidden = !anchor;
+  if (anchor) $('cqt-ground-anchor-controls').open = true;
+ }
+}
+
+async function getGroundFitFrames(kind, targetId, fullControl, row) {
+ if (row) return [row.frame];
+ if (fullControl) {
+  const rows = val('cqt-fc-ground-scope') === 'track' ? fc.allRows.filter((r) => !r.outside) : fcSelectedRows();
+  if (kind.endsWith('-range')) return rows.map((r) => r.frame);
+  const candidates = [fcLayout() === 'focus' ? fc.focusFrame : fc.lastClicked, getFrame(), fcSelectedRows()[0]?.frame];
+  const current = candidates.find((frame) => {
+   const candidate = fcRowByFrame(frame);
+   return candidate && !candidate.outside;
   });
+  return Number.isInteger(current) ? [current] : [];
  }
-
- const res = await batch.finish();
- if (!res.changed) {
-  return noPlane ? fail(`${noPlane} box: ${NO_PLANE_HINT}.`) : setStatus('ℹ️ Box đã nằm đúng trên mặt đất.', 'success');
+ if (kind.endsWith('-frame')) {
+  const frame = getFrame();
+  return Number.isInteger(frame) ? [frame] : [];
  }
- const dzText = minDz === maxDz ? fmtSigned(minDz, 3) : `${fmtSigned(minDz, 3)} → ${fmtSigned(maxDz, 3)}`;
- setStatus(`✅ Đã fit ${source} ${ids.length === 1 ? `#${ids[0]}` : `${res.changed} object`} @f${frame} (dz ${dzText}m).` + editSuffix(res), 'success');
+ const range = await resolveGroundRange(targetId);
+ const bounds = jobBounds();
+ if (!range || !bounds) return null;
+ const frames = [];
+ for (let frame = Math.max(range.from, bounds.start); frame <= Math.min(range.to, bounds.stop); frame++) {
+  frames.push(frame);
+ }
+ return frames;
 }
 
-// Quét cloud từng frame: mỗi frame nạp cloud 1 lần, đo mặt đất cục bộ dưới từng box (Target hoặc cả nhóm)
-async function groundSweepCloud(useLidarOrigin = false) {
- const ids = selectedOrTarget();
- if (!ids.length) return fail('Chọn object trước!');
- const source = useLidarOrigin ? 'gốc LiDAR' : 'quanh box';
- if (!allowAutoFrames(`Quét Cloud dải ${source}`)) return null;
- const lidar = useLidarOrigin ? lidarGroundOptions() : null;
- if (useLidarOrigin && !lidar) return;
- const r = await resolveGroundRange(ids[0]);
- if (!r) return;
+async function runGroundFit(kind, { fullControl = false, row = null } = {}) {
+ if (groundFitting || isToolBusy() || fc.busy || fc.harvesting) return fail('Đang xử lý thao tác trước, thử lại khi hoàn tất.');
+ if (!Object.hasOwn(GROUND_FIT_CHOICES, kind)) return;
+ const job = getJob();
+ const anchor = kind === 'anchor-range';
+ const lidar = kind.startsWith('lidar') ? lidarGroundOptions() : null;
+ if (kind.startsWith('lidar') && !lidar) return;
+ const refIds = anchor ? getExplicitAnchorIds() : [];
+ if (anchor && !refIds.length) return fail('Nhập ít nhất một Anchor ID trong phần tuỳ chỉnh.');
+ const targetIds = (fullControl ? [fc.targetId].filter(Number.isInteger) : selectedOrTarget())
+  .filter((id) => !refIds.includes(id));
+ if (!targetIds.length) return fail('Chọn cuboid mục tiêu khác với Anchor.');
 
- const mode = val('cqt-ground-mode') || 'snap';
- const direction = val('cqt-ground-direction') || 'both';
- const autoFallback = isChecked('cqt-ground-auto-fallback');
- const totalFrames = r.to - r.from + 1;
- const who = idsText(ids);
-
- if (totalFrames > 30 &&
-  !confirm(`Quét Cloud từng frame cho ${who} từ frame ${r.from} đến ${r.to} (${totalFrames} frame)?
-Tool sẽ tự chuyển frame để nạp point cloud của từng frame.`)) {
-  return;
- }
-
+ const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
+ const mode = val(prefix + 'mode') || 'snap';
+ const direction = val(prefix + 'direction') || 'both';
+ const label = GROUND_FIT_CHOICES[kind];
  const originalFrame = getFrame();
- const batch = createBatch(`Quét Cloud ${source} fit đất dải (${who})`);
- let prevPos = null;
- let noCloud = 0, fallbackCount = 0;
- const lastGood = new Map(); // id -> plane gần nhất của chính box đó
- let minDz = Infinity, maxDz = -Infinity;
+ const missing = new Set();
+ const report = $(prefix + 'result');
+ const keyframesOnly = !fullControl && kind.endsWith('-range') && val('cqt-ground-scope') === 'keyframes';
+ let scanned = 0;
+ let fitStates = 0;
+ let skippedDirection = 0;
+ let protectedCount = 0;
+ let result;
+ let previousCloud = null;
+ let movedForFit = false;
+ groundFitting = true;
+ try {
+  const frames = await getGroundFitFrames(kind, targetIds[0], fullControl, row);
+  if (!frames) return;
+  if (!frames.length) return fail('Chọn frame có cuboid cần fit.');
+  if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) return;
+  if (!anchor && !safeData() && frames.length > 30 &&
+      !confirm(`Fit ${label} trên ${frames.length} frame. CVAT có thể tự chuyển frame để nạp point cloud. Tiếp tục?`)) return;
 
- for (let f = r.from; f <= r.to; f++) {
-  const states = [];
-  for (const id of ids) {
-   const s = await getState(id, f);
-   if (!isCuboid(s) || s.outside) continue;
-   if (r.keyframesOnly && !isKey(s)) continue;
-   states.push(s);
-  }
-  if (!states.length) continue;
-
-  setStatus(`⏳ Đang quét Cloud ${who}: frame ${f}/${r.to}...`);
-  const pos = await cloudAtFrame(f, prevPos);
-  if (pos) prevPos = pos;
-  const originPlane = useLidarOrigin ? lidarGroundPlane(pos, lidar) : null;
-
-  for (const s of states) {
-   let plane = useLidarOrigin ? originPlane : (pos ? estimateGroundPlane(s.points, pos) : null);
-   if (plane) {
-    lastGood.set(s.clientID, plane);
-    if (!useLidarOrigin && ids.length === 1) groundPlaneCache.set(gpKey(f), { ...plane, source: `cloud @f${f}`, frame: f, ref: [s.points[0], s.points[1]] });
-   } else if (!useLidarOrigin && autoFallback && lastGood.has(s.clientID)) {
-    plane = lastGood.get(s.clientID);
-    fallbackCount++;
-   } else {
-    noCloud++;
-    continue;
+  renderGroundMissing(report, missing, refIds);
+  const batch = createBatch(`Fit Ground · ${label}`);
+  try {
+   for (const frame of frames) {
+    if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) break;
+    const states = [];
+    for (const id of targetIds) {
+     const state = await getState(id, frame);
+     if (!isCuboid(state) || state.outside || (keyframesOnly && !isKey(state))) continue;
+     if (state.lock || state.isGroundTruth) { protectedCount++; continue; }
+     states.push(state);
+    }
+    if (!states.length) continue;
+    scanned++;
+    if (frames.length > 1) setStatus(`Đang fit ${label} · F${frame} / F${frames.at(-1)}`, '', { silentToast: true });
+    let framePlane = null;
+    let positions = null;
+    if (anchor) {
+     for (const id of refIds) {
+      const state = await getState(id, frame);
+      if (!isCuboid(state) || state.outside) continue;
+      const plane = planeFromSingleBox(state.points);
+      framePlane = { ...plane, source: `anchor #${id} @f${frame}`, frame };
+      groundPlaneCache.set(gpKey(frame), framePlane);
+      break;
+     }
+    } else {
+     const cached = !lidar && fullControl && fcRowByFrame(frame);
+     if (getFrame() === frame) positions = await cloudAtFrame(frame, null);
+     if (!positions && cached) positions = fcCloud(cached);
+     if (!positions && getFrame() !== frame && !safeData()) {
+      movedForFit = true;
+      positions = await cloudAtFrame(frame, previousCloud);
+      if (positions) previousCloud = positions;
+     }
+     if (lidar) framePlane = lidarGroundPlane(positions, lidar);
+    }
+    if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) break;
+    for (const state of states) {
+     const plane = anchor || lidar ? framePlane : (positions && estimateGroundPlane(state.points, positions));
+     if (!plane) { missing.add(frame); continue; }
+     fitStates++;
+     if (!anchor && targetIds.length === 1) {
+      groundPlaneCache.set(gpKey(frame), {
+       ...plane, source: `${lidar ? 'LiDAR' : 'cloud'} @f${frame}`, frame,
+       ref: [state.points[0], state.points[1]],
+      });
+     }
+     await batch.edit(state, frame, (st) => {
+      const after = fitToGround(st.points, plane, mode);
+      const dz = after[2] - st.points[2];
+      if ((direction === 'down' && dz > 1e-4) || (direction === 'up' && dz < -1e-4)) {
+       skippedDirection++;
+       return false;
+      }
+      const rotated = Math.abs(after[3] - st.points[3]) > 1e-6 || Math.abs(after[4] - st.points[4]) > 1e-6;
+      if (Math.abs(dz) < 1e-4 && !rotated) return false;
+      st.points = after;
+      return true;
+     });
+    }
    }
-
-   await batch.edit(s, f, (st) => {
-    const after = fitToGround(st.points, plane, mode);
-    const dz = after[2] - st.points[2];
-    const rotChanged = Math.abs(after[3] - st.points[3]) > 1e-6 || Math.abs(after[4] - st.points[4]) > 1e-6;
-    if (Math.abs(dz) < 1e-4 && !rotChanged) return false;
-    if ((direction === 'down' && dz > 0) || (direction === 'up' && dz < 0)) return false;
-    st.points = after;
-    minDz = Math.min(minDz, dz);
-    maxDz = Math.max(maxDz, dz);
-    return true;
-   });
-  }
- }
-
- const res = await batch.finish();
- if (Number.isInteger(originalFrame) && originalFrame !== getFrame()) await goToFrame(originalFrame);
-
- if (!res.changed) {
-  return setStatus(
-   noCloud ? `⚠️ Không đủ điểm cloud để fit (${noCloud} lần thiếu).` : 'ℹ️ Các frame đã nằm sát mặt đất.',
-   noCloud ? 'warn' : 'success'
-  );
- }
-
- setStatus(
-  `🤖 Đã quét Cloud ${source} & fit ${res.changed} lượt cho ${who} (dz ${fmtSigned(minDz, 3)} → ${fmtSigned(maxDz, 3)}m)` +
-  (fallbackCount ? `, ${fallbackCount} lần kế thừa plane frame trước` : '') +
-  (noCloud ? `, ${noCloud} lần bỏ qua do mất cloud` : '') + '.' + editSuffix(res),
-  'success'
- );
-}
-
-async function groundFollowReference() {
- const refIds = getReferenceBoxIds();
- if (!refIds.length) {
-  return fail(`Cần ít nhất 1 Anchor ID (vd: 1 hoặc chuỗi ưu tiên: 1, 4). Trỏ chuột vào xe chuẩn trên màn 3D bấm ${KEY_PREFIX}B hoặc nhập vào ô Anchor.`);
- }
-
- // Xác định danh sách target: Target ID hoặc nhóm box được chọn (trừ các Anchor ID)
- const targetIds = selectedOrTarget().filter((tid) => !refIds.includes(tid));
- if (!targetIds.length) {
-  return fail('Không có object mục tiêu nào cần fit! Hãy nhập Target ID hoặc chọn các box cần fit (khác với Anchor ID).');
- }
-
- // Dải frame: lấy theo target đầu tiên hoặc dải đang nhập
- const r = await resolveGroundRange(targetIds[0]);
- if (!r) return;
-
- const mode = val('cqt-ground-mode') || 'snap';
- const direction = val('cqt-ground-direction') || 'both';
- const autoFallback = isChecked('cqt-ground-auto-fallback');
-
- const targetLabels = targetIds.map((id) => '#' + id).join(', ');
- const anchorLabels = refIds.map((id) => '#' + id).join(' → ');
- setStatus(`Đang bám Anchor (${anchorLabels}) fit cho ${targetIds.length} object (${targetLabels}) từ frame ${r.from} đến ${r.to}...`);
-
- const batch = createBatch(`Bám Anchor dải (${targetLabels})`);
- let fitted = 0, noRef = 0, skipped = 0;
- const missingFrames = [];
- const fallbackFrames = [];
- let lastGoodPlane = groundPlane;
- let minDz = Infinity, maxDz = -Infinity;
-
- for (let f = r.from; f <= r.to; f++) {
-  // Kiểm tra xem có ít nhất 1 target xuất hiện tại frame f không
-  let anyTarget = false;
-  for (const tid of targetIds) {
-   const ts = await getState(tid, f);
-   if (ts && isCuboid(ts) && !ts.outside) { anyTarget = true; break; }
-  }
-  if (!anyTarget) continue;
-
-  // 1. Tìm Anchor hợp lệ đầu tiên theo chuỗi ưu tiên
-  let activeAnchor = null;
-  for (const rid of refIds) {
-   const rs = await getState(rid, f);
-   if (rs && isCuboid(rs) && !rs.outside) {
-    activeAnchor = { id: rid, state: rs };
-    break;
+  } finally {
+   try {
+    if (movedForFit && getJob() === job && Number.isInteger(originalFrame) && originalFrame !== getFrame()) {
+     await goToFrame(originalFrame);
+    }
+   } finally {
+    result = await batch.finish(getJob() === job);
    }
   }
-
-  let plane = null;
-  if (activeAnchor) {
-   const sp = planeFromSingleBox(activeAnchor.state.points);
-   plane = { ...sp, source: `anchor #${activeAnchor.id} @f${f}`, frame: f };
-   lastGoodPlane = plane;
-   groundPlaneCache.set(gpKey(f), plane);
-  } else if (autoFallback && lastGoodPlane) {
-   plane = lastGoodPlane;
-   fallbackFrames.push(f);
-  } else {
-   noRef++;
-   missingFrames.push(f);
-   continue;
+  if (getJob() !== job) return;
+  renderGroundMissing(report, missing, refIds);
+  if (anchor) {
+   invalidateHealthCache();
+   await healthRefresh(true);
   }
-
-  // 2. Fit cho tất cả các object mục tiêu tại frame f
-  for (const tid of targetIds) {
-   const s = await getState(tid, f);
-   if (!s || !isCuboid(s) || s.outside) { skipped++; continue; }
-   if (r.keyframesOnly && !isKey(s)) { skipped++; continue; }
-
-   await batch.edit(s, f, (st) => {
-    const after = fitToGround(st.points, plane, mode);
-    const dz = after[2] - st.points[2];
-    const rotChanged = Math.abs(after[3] - st.points[3]) > 1e-6 || Math.abs(after[4] - st.points[4]) > 1e-6;
-    if (Math.abs(dz) < 1e-4 && !rotChanged) return false;
-    if ((direction === 'down' && dz > 0) || (direction === 'up' && dz < 0)) return false;
-    st.points = after;
-    minDz = Math.min(minDz, dz);
-    maxDz = Math.max(maxDz, dz);
-    fitted++;
-    return true;
-   });
-  }
+  if (result.changed && fc.open && !fc.toolsOpen) await fcReloadStates();
+  if (!scanned && !protectedCount) return fail('Không có cuboid hiện trên các frame trong phạm vi fit.');
+  const gaps = formatFrameRanges([...missing]).map(({ text }) => text);
+  const missingText = missing.size ? ` Bỏ qua ${missing.size} frame thiếu ${anchor ? 'Anchor' : 'dữ liệu mặt đất'} (${gaps.slice(0, 12).join(', ')}${gaps.length > 12 ? ', …' : ''}).` : '';
+  const protectedText = protectedCount ? ` Bỏ qua ${protectedCount} cuboid đã khoá hoặc ground truth.` : '';
+  const directionText = skippedDirection ? ` Bỏ qua ${skippedDirection} lượt theo hướng đã chọn.` : '';
+  const message = result.changed ? `Đã fit ${result.changed} lượt.` : fitStates ? 'Cuboid không cần thay đổi theo tuỳ chọn hiện tại.' : 'Chưa fit được cuboid.';
+  setStatus(label + ' · ' + message + missingText + protectedText + directionText +
+   (!anchor && safeData() && missing.size ? ' Bật Tự nạp Cloud nếu cần quét frame chưa có dữ liệu.' : '') +
+   editSuffix(result), missing.size || protectedCount || result.errors || !result.restored ? 'warn' : 'success');
+ } finally {
+  groundFitting = false;
  }
-
- const res = await batch.finish();
- renderAnchorMissingBox(missingFrames, fallbackFrames, refIds);
- invalidateHealthCache();
- await healthRefresh(true);
-
- const allNoAnchor = [...missingFrames, ...fallbackFrames];
- const missRangeTxt = allNoAnchor.length
-  ? ` [Thiếu Anchor tại: ${formatFrameRanges(allNoAnchor).map((x) => x.text).join(', ')}]`
-  : '';
-
- if (!res.changed) {
-  return setStatus(
-   allNoAnchor.length
-    ? `Không tìm thấy Anchor (${anchorLabels}) tại ${allNoAnchor.length} frame${missRangeTxt}. Xem dải Frame để nhảy tới kiểm tra!`
-    : 'Các object đã đúng cao độ mặt đất theo Anchor.',
-   allNoAnchor.length ? 'warn' : 'success'
-  );
- }
-
- setStatus(
-  `Đã bám Anchor (${anchorLabels}) & fit ${res.changed} lần cho ${targetIds.length} object (${targetLabels}) ` +
-  `(dz ${fmtSigned(minDz, 3)} → ${fmtSigned(maxDz, 3)}m)` +
-  (fallbackFrames.length ? `, kế thừa ${fallbackFrames.length}F` : '') +
-  (missingFrames.length ? `, bỏ qua ${missingFrames.length}F mất Anchor` : '') +
-  missRangeTxt + editSuffix(res),
-  allNoAnchor.length ? 'warn' : 'success'
- );
 }
 
 async function applyGroundFit() {
@@ -2292,39 +2264,6 @@ async function applyGroundFit() {
   (noPlane ? ` Bỏ qua ${noPlane} frame: ${NO_PLANE_HINT}.` : '') + editSuffix(res),
   noPlane ? 'warn' : 'success'
  );
-}
-
-// Alt+G: đặt object(s) lên mặt đất cục bộ (tính từ cloud quanh từng object) tại frame hiện tại
-async function quickGroundSnap(ids) {
- const frame = getFrame();
- if (!Number.isInteger(frame)) return fail('Không đọc được frame hiện tại.');
- const list = ids?.length ? ids : [resolveTargetId()].filter(Number.isInteger);
- if (!list.length) return fail('Chọn object trước!');
-
- const mode = val('cqt-ground-mode') || 'snap';
- const batch = createBatch('Hạ chạm đất');
- let noCloud = 0;
- for (const id of list) {
-  const s = await getState(id, frame);
-  if (!isCuboid(s) || s.outside) continue;
-  let plane = planeFromCloud(s.points) || planeForFrame(frame, s.points);
-  if (!plane && isChecked('cqt-ground-auto-fallback')) {
-   const prev = findPrevGroundPlane(frame);
-   if (prev) plane = prev.plane;
-  }
-  if (!plane) { noCloud++; continue; }
-  await batch.edit(s, frame, (st) => {
-   const after = fitToGround(st.points, plane, mode);
-   if (Math.abs(after[2] - st.points[2]) < 1e-4 && mode === 'snap') return false;
-   st.points = after;
-   return true;
-  });
- }
- const res = await batch.finish();
- if (!res.changed) {
-  return setStatus(noCloud ? '⚠️ Không đủ điểm cloud để tìm mặt đất (và không có plane frame trước).' : 'ℹ️ Đã nằm sát mặt đất.', noCloud ? 'error' : 'success');
- }
- setStatus(`⬇️ Đã hạ chạm đất ${res.changed} object tại frame ${frame}.` + editSuffix(res), 'success');
 }
 
 // =========================================================================
@@ -2784,7 +2723,7 @@ async function fetchLWH(id, frame = getFrame()) {
  const lim = getLimitsForLabel(label);
  const out = lim ? limitViolations(l, w, h, lim) : [];
  setStatus(
-  `✅ Đã chốt LWH #${id} [${label}] @f${frame}: ${fmtLWH(l, w, h)} — bấm ${KEY_PREFIX}D để đồng bộ track` +
+  `✅ Đã chốt LWH #${id} [${label}] @f${frame}: ${fmtLWH(l, w, h)} — bấm ${OPTION_KEY}S để đồng bộ track` +
   (out.length ? ` ⚠️ Ngoài limits: ${out.join('; ')}.` : (lim ? ' (trong limits).' : '.')),
   out.length ? 'warn' : 'success'
  );
@@ -5246,7 +5185,7 @@ async function cloudAtFrame(f, prev) {
  if (getFrame() === f) {
   if (prev) return prev;
   for (let t = 0; t < 50 && !playerReady(); t++) await sleep(100);
-  return getPointCloudPositions();
+  return playerReady() ? getPointCloudPositions() : null;
  }
  // Chốt chặn cuối: chế độ an toàn chỉ dùng cloud của frame đang xem, không tự chuyển frame
  if (safeData()) return null;
@@ -6892,16 +6831,16 @@ const KEY_CODE_LABELS = {
  Backslash: '\\', Comma: '<', Period: '>', Backquote: '`',
  Numpad7: 'Num7', Numpad1: 'Num1', Numpad3: 'Num3', NumpadDecimal: 'Num.',
 };
-function markShortcut(e) {
+function markShortcut(e, prefix = KEY_PREFIX) {
  const base = KEY_CODE_LABELS[e.code] || e.code.replace(/^(Key|Digit)/, '');
- activeKeyBadge = `${KEY_PREFIX}${e.shiftKey ? 'Shift+' : ''}${base}`;
+ activeKeyBadge = `${prefix}${e.shiftKey ? 'Shift+' : ''}${base}`;
  activeKeyTime = Date.now();
 }
 
 const TRANSFORM_KEYS = { KeyG: 'G', KeyW: 'R', KeyS: 'S' };
 const NUMPAD_VIEWS = { Numpad7: 'top', Numpad1: 'front', Numpad3: 'side', NumpadDecimal: 'focus' };
 const SHORTCUT_ACTIONS = {
- KeyQ: (e) => (e.shiftKey ? toggleStealthUI() : togglePanel()),
+ KeyQ: (e) => (e.shiftKey ? toggleStealthUI() : (fc.open ? fcToggleTools() : togglePanel())),
  Backslash: () => toggleStealthUI(),
  KeyM: () => toggleFullControl(),
  KeyV: () => toggleDockViews(),
@@ -6910,8 +6849,9 @@ const SHORTCUT_ACTIONS = {
  KeyA: () => autoDetectAndSpan(),
  KeyB: (e) => (e.shiftKey ? clearAllAnchors() : toggleAnchorUnderPointer()),
  KeyP: (e) => smartSnap(selectedOrTarget(), e.shiftKey ? true : undefined),
- KeyH: (e) => (e.shiftKey ? applyGroundFit() : quickGroundSnap(selectedOrTarget())),
- KeyL: (e) => (e.shiftKey ? groundSweepCloud(true) : applyGroundFitCurrent(true)),
+ KeyH: (e) => runGroundFitShortcut(e.shiftKey ? 'cloud-range' : 'cloud-frame'),
+ KeyL: (e) => runGroundFitShortcut(e.shiftKey ? 'lidar-range' : 'lidar-frame'),
+ KeyE: () => runGroundFitShortcut('anchor-range'),
  KeyC: () => fetchLWH(),
  KeyD: (e) => applyLWH(e.shiftKey ? 'range' : 'track'),
  KeyR: (e) => (e.shiftKey ? alignYawCurrentFrame() : rotateTrack(180)),
@@ -6929,6 +6869,35 @@ const SHORTCUT_ACTIONS = {
  Digit3: (e) => cameraView('side', e.shiftKey),
  Digit7: (e) => cameraView('top', e.shiftKey),
 };
+
+// The physical key code also works when Option produces a symbol on macOS.
+const DIRECT_OPTION_ACTIONS = {
+ KeyQ: SHORTCUT_ACTIONS.KeyQ,
+ KeyT: SHORTCUT_ACTIONS.KeyM,
+ KeyV: SHORTCUT_ACTIONS.KeyV,
+ KeyW: SHORTCUT_ACTIONS.KeyU,
+ KeyN: SHORTCUT_ACTIONS.KeyN,
+ KeyA: SHORTCUT_ACTIONS.KeyA,
+ KeyB: SHORTCUT_ACTIONS.KeyB,
+ KeyP: SHORTCUT_ACTIONS.KeyP,
+ KeyH: SHORTCUT_ACTIONS.KeyH,
+ KeyG: SHORTCUT_ACTIONS.KeyL,
+ KeyC: SHORTCUT_ACTIONS.KeyC,
+ KeyS: SHORTCUT_ACTIONS.KeyD,
+ KeyR: SHORTCUT_ACTIONS.KeyR,
+ KeyX: SHORTCUT_ACTIONS.KeyX,
+ KeyZ: SHORTCUT_ACTIONS.KeyZ,
+ KeyY: SHORTCUT_ACTIONS.KeyE,
+};
+const DIRECT_OPTION_SHIFT = new Set(['KeyB', 'KeyP', 'KeyH', 'KeyG', 'KeyS', 'KeyR', 'KeyX', 'KeyZ']);
+function runGroundFitShortcut(kind) {
+ const fullControl = fc.open && !fc.toolsOpen;
+ const field = fullControl ? 'cqt-fc-ground-kind' : 'cqt-ground-kind';
+ setField(field, kind);
+ syncGroundFitControls(fullControl);
+ if (fullControl) $('cqt-fc-ground-controls').open = true;
+ return runGroundFit(kind, { fullControl });
+}
 
 let shortcutUntil = 0;
 function hasNativePrefix(shortcut = 'alt+q+shift') {
@@ -6979,12 +6948,8 @@ function onKeyDown(e) {
  }
  if (isTyping(e)) { shortcutUntil = 0; return; }
 
- if (e.code === 'KeyQ' && e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && !hasNativePrefix('alt+q')) {
-  swallow(e);
-  if (!e.repeat) togglePanel();
-  return;
- }
- if (e.code === 'KeyQ' && e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && !hasNativePrefix()) {
+ const optionOnly = e.altKey && !e.ctrlKey && !e.metaKey && !e.getModifierState('AltGraph');
+ if (optionOnly && e.code === 'KeyQ' && e.shiftKey && !hasNativePrefix()) {
   swallow(e);
   if (!e.repeat) {
    shortcutUntil = Date.now() + 2400;
@@ -6992,8 +6957,20 @@ function onKeyDown(e) {
   }
   return;
  }
- if (['Alt', 'Shift', 'Meta', 'Control'].includes(e.key)) return;
  const armed = Date.now() <= shortcutUntil;
+ if (optionOnly && !(armed && TRANSFORM_KEYS[e.code])) {
+  const action = !e.shiftKey || DIRECT_OPTION_SHIFT.has(e.code) ? DIRECT_OPTION_ACTIONS[e.code] : null;
+  const nativeKey = ['alt', e.code.slice(3).toLowerCase(), ...(e.shiftKey ? ['shift'] : [])].sort().join('+');
+  shortcutUntil = 0;
+  if (!action || hasNativePrefix(nativeKey)) return;
+  swallow(e);
+  if (!e.repeat) {
+   markShortcut(e, OPTION_KEY);
+   void guarded(action)(e);
+  }
+  return;
+ }
+ if (['Alt', 'Shift', 'Meta', 'Control'].includes(e.key)) return;
  shortcutUntil = 0;
  if (e.repeat || e.ctrlKey || e.metaKey) return;
 
@@ -7594,17 +7571,17 @@ async function fcToggleTools() {
  if (fc.toolsOpen) {
   fc.toolsOpen = false;
   root.classList.remove('cqt-fc-tools-open');
-  panelApi?.setPinned(fc.panelWasOpen);
+  panelApi?.setState(fc.previousSidebarState);
  } else {
   if (!Number.isInteger(fc.targetId)) return fail('Nạp Track trước khi mở công cụ.');
   const frame = fcLayout() === 'focus' ? fc.focusFrame : (fc.lastClicked ?? getFrame());
   if (Number.isInteger(frame) && !(await goToFrame(frame))) return fail(`Không mở được frame ${frame}.`);
   if (!fc.open) return;
   await jumpTo(fc.targetId, frame);
-  fc.panelWasOpen = !$('cvat-quicktool-panel').inert;
+  fc.previousSidebarState = panelApi?.getState() || 'closed';
   fc.toolsOpen = true;
   root.classList.add('cqt-fc-tools-open');
-  panelApi?.setPinned(true);
+  panelApi?.setState('pinned');
  }
  $('cqt-fc-tools')?.setAttribute('aria-pressed', String(fc.toolsOpen));
 }
@@ -7646,6 +7623,7 @@ async function fcLoadTrack(id = intVal('cqt-fc-target')) {
  fc.rowsByFrame = new Map(fc.allRows.map((row) => [row.frame, row]));
  fc.selected.clear();
  fc.lastClicked = null;
+ renderGroundMissing($('cqt-fc-ground-result'), new Set(), []);
  fc.focusFrame = getFrame();
  fcComputeExtent();
  fcRenderList();
@@ -7845,16 +7823,6 @@ async function fcSnapRows(rows) {
   return fcSetPoints(st, r.points);
  });
  if (res && skipped) setStatus(`Smart Snap: bỏ qua ${skipped} frame (thiếu cloud hoặc < 3 điểm của object).`, 'warn');
-}
-
-async function fcGroundRows(rows) {
- let skipped = 0;
- const res = await fcApply('Fit chạm đất', rows, (st, row) => {
-  const plane = fcGroundPlane(row);
-  if (!plane) { skipped++; return false; }
-  return fcSetPoints(st, fitToGround(st.points, plane, 'snap'));
- });
- if (res && skipped) setStatus(`Fit chạm đất: bỏ qua ${skipped} frame không đủ điểm mặt đất.`, 'warn');
 }
 
 function fcFlattenRows(rows) {
@@ -8672,7 +8640,7 @@ function fcRowHTML(row) {
    <div class="cqt-fc-info" data-role="info"></div>
    <div class="cqt-fc-actions">
     <button class="cqt-btn cqt-btn-secondary cqt-sm" data-act="snap" title="Smart Snap theo cloud của frame này (hoặc cả nhóm đang chọn)">Snap</button>
-    <button class="cqt-btn cqt-btn-secondary cqt-sm" data-act="ground" title="Hạ chạm đất theo cloud của frame này (hoặc cả nhóm đang chọn)">Chạm đất</button>
+    <button class="cqt-btn cqt-btn-secondary cqt-sm" data-act="ground" title="Mở tuỳ chọn Fit Ground cho frame này">Chạm đất</button>
     <button class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" data-act="flat" title="Đặt phẳng Pitch = Roll = 0° (giữ đáy)">0°</button>
    </div>
   </div>`;
@@ -9536,8 +9504,8 @@ const FC_HTML = `
    <button id="cqt-fc-tools" class="cqt-btn cqt-btn-secondary cqt-sm" aria-pressed="false">Công cụ Toolbox</button>
    <button id="cqt-fc-qc" class="cqt-btn cqt-btn-secondary cqt-sm">QA/QC</button>
    <button id="cqt-fc-theme" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Đổi giao diện Sáng (Light) / Tối (Dark)"></button>
-   <button id="cqt-fc-undo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled title="Hoàn tác thao tác gần nhất (${KEY_PREFIX}Z)">${ICONS.undo}<span>Undo</span></button>
-   <button id="cqt-fc-redo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled title="Làm lại thao tác vừa hoàn tác (${KEY_PREFIX}${IS_MAC ? '⇧Z' : 'Shift+Z'})">${ICONS.redo}<span>Redo</span></button>
+   <button id="cqt-fc-undo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled title="Hoàn tác thao tác gần nhất (${OPTION_KEY}Z)">${ICONS.undo}<span>Undo</span></button>
+   <button id="cqt-fc-redo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled title="Làm lại thao tác vừa hoàn tác (${OPTION_KEY}${IS_MAC ? '⇧Z' : 'Shift+Z'})">${ICONS.redo}<span>Redo</span></button>
    <button id="cqt-fc-max" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" title="Phóng to toàn màn / Thu về cửa sổ"></button>
    <button id="cqt-fc-close" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" title="Đóng (Esc)">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -9623,8 +9591,7 @@ const FC_HTML = `
   <span class="cqt-fc-sep"></span>
   <button id="cqt-fc-interp" class="cqt-btn cqt-btn-secondary cqt-sm" title="Nội suy tuyến tính các frame giữa frame chọn đầu tiên và cuối cùng">Nội suy đầu → cuối</button>
   <button id="cqt-fc-snap" class="cqt-btn cqt-btn-secondary cqt-sm" title="Smart Snap từng frame đang chọn theo cloud đã cache">Smart Snap</button>
-  <label class="cqt-check"><input type="checkbox" id="cqt-fc-fitsize" /> Fit size</label>
-  <button id="cqt-fc-ground" class="cqt-btn cqt-btn-secondary cqt-sm" title="Hạ chạm đất từng frame đang chọn theo cloud đã cache">Fit chạm đất</button>
+  <label class="cqt-check" title="${FIT_SIZE_HINT}"><input type="checkbox" id="cqt-fc-fitsize" /> Đo lại L/W/H</label>
   <button id="cqt-fc-flat" class="cqt-btn cqt-btn-secondary cqt-sm" title="Đặt phẳng Pitch = Roll = 0° cho các frame đang chọn">Đặt phẳng 0°</button>
   <button id="cqt-fc-key-on" class="cqt-btn cqt-btn-secondary cqt-sm" title="Đặt keyframe cho các frame đang chọn (không gỡ keyframe)">Đặt Key</button>
   <span class="cqt-fc-sep"></span>
@@ -9647,6 +9614,23 @@ const FC_HTML = `
    <button id="cqt-fc-confirm-in" class="cqt-btn cqt-btn-secondary cqt-sm cqt-hp-btn-in" title="Xác nhận khôi phục Inside (hiện lại) theo phạm vi bên trái">${ICONS.eye}<span>Inside</span></button>
   </div>
  </div>
+ </details>
+ <details id="cqt-fc-ground-controls" class="cqt-fc-disclosure cqt-fc-ground">
+  <summary>Fit Ground</summary>
+  <div class="cqt-row cqt-wrap cqt-ground-controls">
+   ${groundFitSelect('cqt-fc-ground-kind', 'Nguồn và phạm vi', GROUND_FIT_CHOICES)}
+   ${groundFitSelect('cqt-fc-ground-scope', 'Phạm vi dải', { selected: 'Frame đã chọn', track: 'Toàn track' })}
+   ${groundFitSelect('cqt-fc-ground-mode', 'Cách đặt', GROUND_FIT_MODES)}
+   ${groundFitSelect('cqt-fc-ground-direction', 'Hướng', GROUND_FIT_DIRECTIONS)}
+   <label id="cqt-fc-ground-anchor-field" class="cqt-col" hidden><span class="cqt-label">Anchor ID ưu tiên</span>
+    <input id="cqt-fc-ground-anchor-ids" class="cqt-input" type="text" placeholder="vd: 1, 4" />
+   </label>
+   <button id="cqt-fc-ground" class="cqt-btn cqt-btn-primary cqt-sm">Fit chạm đất</button>
+  </div>
+  <div id="cqt-fc-ground-lidar-fields" class="cqt-row cqt-wrap cqt-ground-controls" hidden>
+   ${lidarGroundFields('fc-')}
+  </div>
+  <div id="cqt-fc-ground-result" class="cqt-ground-result" role="status" hidden></div>
  </details>
 
  <div class="cqt-fc-grid">
@@ -9915,7 +9899,12 @@ function fcBindWindow(el) {
  });
  on('cqt-fc-interp', () => fcInterpolate(fcSelectedRows(), 'Nội suy đầu → cuối'));
  on('cqt-fc-snap', () => fcSnapRows(fcSelectedRows()));
- on('cqt-fc-ground', () => fcGroundRows(fcSelectedRows()));
+ on('cqt-fc-ground', () => runGroundFit(val('cqt-fc-ground-kind'), { fullControl: true }));
+ on('cqt-fc-ground-kind', () => syncGroundFitControls(true), 'change');
+ on('cqt-fc-ground-anchor-ids', (e) => setReferenceBoxIds(parseReferenceBoxIds(e.target.value)), 'change');
+ bindGroundMissing($('cqt-fc-ground-result'), true);
+ bindLidarGroundFields(on, 'fc-');
+ syncGroundFitControls(true);
  on('cqt-fc-flat', () => fcFlattenRows(fcSelectedRows()));
  on('cqt-fc-key-on', () => {
   const rows = fc.selected.size ? fcSelectedRows() : fc.allRows.filter((r) => !r.outside);
@@ -10083,7 +10072,10 @@ function fcBindWindow(el) {
   } else if (act === 'snap') {
    await fcSnapRows(fcTargetsFor(row));
   } else if (act === 'ground') {
-   await fcGroundRows(fcTargetsFor(row));
+   fc.focusFrame = row.frame;
+   fc.lastClicked = row.frame;
+   $('cqt-fc-ground-controls').open = true;
+   $('cqt-fc-ground-kind').focus();
   } else if (act === 'flat') {
    await fcFlattenRows(fcTargetsFor(row));
   }
@@ -10227,8 +10219,8 @@ function dockEnsureEls() {
     <span class="cqt-dock-info"></span>
     <button data-act="prev" title="Frame trước của object (lăn lên) · Shift: keyframe trước">&lsaquo;</button>
     <button data-act="next" title="Frame sau của object (lăn xuống) · Shift: keyframe sau">&rsaquo;</button>
-    <button data-act="expand" title="Mở rộng: Full Control đè lên layout CVAT (${KEY_PREFIX}M)">&#10530;</button>
-    <button data-act="hide" title="Ẩn tạm, hiện lại ô nhìn gốc của CVAT (${KEY_PREFIX}V để bật lại)">&times;</button>
+    <button data-act="expand" title="Mở rộng: Full Control đè lên layout CVAT (${OPTION_KEY}T)">&#10530;</button>
+    <button data-act="hide" title="Ẩn tạm, hiện lại ô nhìn gốc của CVAT (${OPTION_KEY}V để bật lại)">&times;</button>
    </div>
    <canvas data-view="${view}"></canvas>
    <div class="cqt-dock-empty"></div>`;
@@ -10256,7 +10248,7 @@ function dockBindView(e, view) {
    dock.hidden = true;
    syncDockSettingsUI();
    dockLayout();
-   return setStatus(`Đã ẩn ô nhìn nhúng, đang hiện ô gốc của CVAT. ${KEY_PREFIX}V để bật lại.`, 'info');
+   return setStatus(`Đã ẩn ô nhìn nhúng, đang hiện ô gốc của CVAT. ${OPTION_KEY}V để bật lại.`, 'info');
   }
  }));
  box.addEventListener('wheel', (ev) => {
@@ -10340,9 +10332,12 @@ function dockLayout() {
    dock.observer.observe(host.el);
   }
  }
- healthLayout(onJob && hasTarget);
+ const perspective = onJob ? cvatViewRect('perspective') : null;
+ if (perspective) {
+  $('cvat-quicktool-wrapper')?.style.setProperty('--cqt-sidebar-top', `${fc.toolsOpen ? 8 : Math.max(0, perspective.r.top)}px`);
+ }
  if (item.el) {
-  const host = onJob && hasTarget && itemOn() ? cvatViewRect('perspective') : null;
+  const host = hasTarget && itemOn() ? perspective : null;
   if (!host) {
    item.el.style.display = 'none';
   } else {
@@ -10351,13 +10346,11 @@ function dockLayout() {
    const panelLeft = panel && !panel.inert ? panel.getBoundingClientRect().left : window.innerWidth;
    const right = Math.min(host.r.right, panelLeft);
    const left = Math.max(host.r.left + 8, right - item.el.offsetWidth - 8);
-   const hudBounds = health.el?.getBoundingClientRect();
-   const top = hudBounds && hudBounds.width && hudBounds.right + 8 > left &&
-    hudBounds.top <= host.r.top + 36 ? hudBounds.bottom + 8 : host.r.top + 8;
    item.el.style.left = `${left}px`;
-   item.el.style.top = `${top}px`;
+   item.el.style.top = `${host.r.top + 8}px`;
   }
  }
+ healthLayout(onJob && hasTarget);
 }
 
 // ---- Dữ liệu: Target ở frame hiện tại + cloud của đúng frame đó ----
@@ -10588,7 +10581,7 @@ function itemCreate() {
  el.id = 'cqt-item-panel';
  el.style.display = 'none';
  let html = `
-  <div class="cqt-item-head" title="Bấm để thu gọn / mở rộng (${KEY_PREFIX}N bật/tắt bảng)">
+  <div class="cqt-item-head" title="Bấm để thu gọn / mở rộng (${OPTION_KEY}N bật/tắt bảng)">
    <span class="cqt-item-title">Item</span>
    <span class="cqt-item-obj">--</span>
    <span class="cqt-item-caret">▾</span>
@@ -10604,8 +10597,8 @@ function itemCreate() {
  }
  html += `
   <div class="cqt-item-actions">
-   <button id="cqt-item-get-lwh" class="cqt-btn cqt-btn-secondary cqt-sm" title="Xác nhận lấy LWH hiện tại của object đang chọn nạp vào tool (${KEY_PREFIX}C)">Chốt LWH <span class="cqt-kbd">${KEY_PREFIX}C</span></button>
-   <button id="cqt-item-sync-track" class="cqt-btn cqt-btn-primary cqt-sm" title="Đồng bộ LWH cho mọi keyframe toàn track (${KEY_PREFIX}D)">Đồng bộ <span class="cqt-kbd">${KEY_PREFIX}D</span></button>
+   <button id="cqt-item-get-lwh" class="cqt-btn cqt-btn-secondary cqt-sm" title="Xác nhận lấy LWH hiện tại của object đang chọn nạp vào tool (${OPTION_KEY}C)">Chốt LWH <span class="cqt-kbd">${OPTION_KEY}C</span></button>
+   <button id="cqt-item-sync-track" class="cqt-btn cqt-btn-primary cqt-sm" title="Đồng bộ LWH cho mọi keyframe toàn track (${OPTION_KEY}S)">Đồng bộ <span class="cqt-kbd">${OPTION_KEY}S</span></button>
   </div>
   <div class="cqt-item-hint">Enter: áp · ${OPTION_KEY}Enter: áp cả nhóm · kéo nhãn để chỉnh</div></div>`;
  el.innerHTML = html;
@@ -10792,8 +10785,21 @@ function healthLayout(onJob = !!getJob() && Number.isInteger(resolveTargetId()))
   health.offset = lsGet(LS.healthPos, { dx: 8, dy: 8 }) || { dx: 8, dy: 8 };
  }
  health.el.style.setProperty('--cqt-hud-width', `${Math.max(160, host.r.width - 16)}px`);
- const left = clamp(host.r.left + (health.offset.dx ?? 8), 6, Math.max(6, window.innerWidth - health.el.offsetWidth - 8));
- const top = clamp(host.r.top + (health.offset.dy ?? 8), 6, Math.max(6, window.innerHeight - health.el.offsetHeight - 8));
+ const width = health.el.offsetWidth;
+ const height = health.el.offsetHeight;
+ const minX = Math.max(6, host.r.left + 8);
+ const minY = Math.max(6, host.r.top + 8);
+ const maxX = Math.max(minX, Math.min(window.innerWidth, host.r.right) - width - 8);
+ const maxY = Math.max(minY, Math.min(window.innerHeight, host.r.bottom) - height - 8);
+ let left = clamp(host.r.left + (health.offset.dx ?? 8), minX, maxX);
+ let top = clamp(host.r.top + (health.offset.dy ?? 8), minY, maxY);
+ const inspector = item.el?.getBoundingClientRect();
+ if (inspector?.width && left < inspector.right + 8 && left + width > inspector.left - 8 &&
+     top < inspector.bottom + 8 && top + height > inspector.top - 8) {
+  const availableLeft = inspector.left - width - 8;
+  if (availableLeft >= minX) left = Math.min(left, availableLeft);
+  else if (inspector.bottom + 8 <= maxY) top = inspector.bottom + 8;
+ }
  health.el.style.left = `${left}px`;
  health.el.style.top = `${top}px`;
 }
@@ -11073,7 +11079,7 @@ async function handleHealthAction(act, target, rootEl) {
   return;
  }
  if (act === 'open-limits') {
-  panelApi?.setPinned(true);
+  panelApi?.setState('pinned');
   const tabBtn = document.querySelector('#cvat-quicktool-panel .cqt-tab[data-tab="settings"]');
   tabBtn?.click();
   await fillClassNameFromObject();
@@ -11150,7 +11156,7 @@ function healthCreate() {
 <span class="cqt-hp-obj" data-act="toggle-pop" title="Bấm để mở rộng / thu gọn bảng kiểm tra chi tiết">Chọn 1 object</span>
 <span class="cqt-hp-badges" data-act="toggle-pop"></span>
 <div class="cqt-hp-quick">
-<button class="cqt-btn cqt-btn-danger cqt-sm" data-act="cut-here" title="Outside: từ frame hiện tại tới hết track (${KEY_PREFIX}X)">${ICONS.eyeOff}<span>Out F→Hết</span></button>
+<button class="cqt-btn cqt-btn-danger cqt-sm" data-act="cut-here" title="Outside: từ frame hiện tại tới hết track (${OPTION_KEY}X)">${ICONS.eyeOff}<span>Out F→Hết</span></button>
 <button class="cqt-btn cqt-btn-secondary cqt-sm cqt-hp-btn-in" data-act="in-to-end" title="Inside: hiện lại từ frame hiện tại tới hết track">${ICONS.eye}<span>In F→Hết</span></button>
 </div>
 <button class="cqt-hp-expand" data-act="toggle-pop" title="Mở rộng / Thu gọn chi tiết kiểm tra Frame, Outside &amp; Inside">${ICONS.chevronDown}</button>
@@ -11174,7 +11180,7 @@ function healthCreate() {
 <span class="cqt-hp-sec-title">Outside / Inside (2 nút xác nhận độc lập)</span>
 <div class="cqt-hp-row" style="gap:4px;">
 <span class="cqt-hp-out-state"></span>
-<button class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" data-act="open-fc" title="Mở bảng Full Control đa frame (${KEY_PREFIX}M)"><span>Full Control</span></button>
+<button class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" data-act="open-fc" title="Mở bảng Full Control đa frame (${OPTION_KEY}T)"><span>Full Control</span></button>
 </div>
 </div>
 <div class="cqt-hp-row cqt-hp-oi-row">
@@ -11246,17 +11252,22 @@ function healthCreate() {
 function healthOnMouseMove(e) {
  const d = health.drag;
  if (!d || !health.el) return;
- const left = clamp(d.left0 + e.clientX - d.sx, 6, Math.max(6, window.innerWidth - 260));
- const top = clamp(d.top0 + e.clientY - d.sy, 6, Math.max(6, window.innerHeight - 48));
- health.el.style.left = `${left}px`;
- health.el.style.top = `${top}px`;
- health.offset = { dx: Math.round(left - d.hostLeft), dy: Math.round(top - d.hostTop) };
+ health.offset = {
+  dx: d.left0 + e.clientX - d.sx - d.hostLeft,
+  dy: d.top0 + e.clientY - d.sy - d.hostTop,
+ };
+ healthLayout();
 }
 
 function healthOnMouseUp() {
  if (!health.drag) return;
+ const { hostLeft, hostTop } = health.drag;
  health.drag = null;
- if (health.offset) lsSet(LS.healthPos, health.offset);
+ if (health.el) {
+  const rect = health.el.getBoundingClientRect();
+  health.offset = { dx: Math.round(rect.left - hostLeft), dy: Math.round(rect.top - hostTop) };
+  lsSet(LS.healthPos, health.offset);
+ }
 }
 
 function populateHealthPop(rootEl, d, curFrame, curRec) {
@@ -11322,7 +11333,7 @@ function populateHealthPop(rootEl, d, curFrame, curRec) {
    syncSec.innerHTML = `
     <div class="cqt-hp-sec-head">
      <span class="cqt-hp-sec-title"><span class="cqt-hp-dot red"></span>Chưa đồng bộ LWH (${unsyncCount}/${d.visFrames.length}F · Chuẩn: ${fmtLWH(d.stdLWH.l, d.stdLWH.w, d.stdLWH.h)})</span>
-     <button class="cqt-btn cqt-btn-primary cqt-sm" data-act="sync-std" title="Đồng bộ toàn bộ keyframe về kích thước chuẩn ${fmtLWH(d.stdLWH.l, d.stdLWH.w, d.stdLWH.h)} (${KEY_PREFIX}D)">Đồng bộ chuẩn</button>
+     <button class="cqt-btn cqt-btn-primary cqt-sm" data-act="sync-std" title="Đồng bộ toàn bộ keyframe về kích thước chuẩn ${fmtLWH(d.stdLWH.l, d.stdLWH.w, d.stdLWH.h)} (${OPTION_KEY}S)">Đồng bộ chuẩn</button>
     </div>
     <div class="cqt-hp-issue-list">${rowsHtml}${more}</div>
    `;
@@ -11391,7 +11402,7 @@ function populateHealthPop(rootEl, d, curFrame, curRec) {
       <span class="cqt-hp-sec-title"><span class="cqt-hp-dot purple"></span>Mất Anchor #${d.anchorIds.join(', #')} tại ${d.missingAnchorFrames.length}F</span>
      </div>
      <div class="cqt-row cqt-wrap" style="gap:4px; margin-top:4px;">${jumpBtns}</div>
-     <div class="cqt-hint" style="margin-top:2px;">Bấm nút dải frame để nhảy tới chỗ mất Anchor, trỏ xe chuẩn rồi bấm <b>${KEY_PREFIX}B</b> để thêm Anchor.</div>
+     <div class="cqt-hint" style="margin-top:2px;">Bấm nút dải frame để nhảy tới chỗ mất Anchor, trỏ xe chuẩn rồi bấm <b>${OPTION_KEY}B</b> để thêm Anchor.</div>
     `;
     anchorSec.style.display = 'flex';
    } else {
@@ -11576,10 +11587,9 @@ const STYLES = `
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-item-panel,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-health-pill { --cqt-bg: #ffffff; --cqt-bg-bar: #f4f4f5; --cqt-bg-card: #f8fafc; --cqt-bg-elev: #f1f5f9; --cqt-bg-hover: #e4e4e7; --cqt-bg-input: #ffffff; --cqt-bg-view: #f8fafc; --cqt-border: #d4d4d8; --cqt-border-btn: #a1a1aa; --cqt-border-strong: #52525b; --cqt-border-subtle: #e4e4e7; --cqt-text: #09090b; --cqt-text-sec: #18181b; --cqt-text-muted: #52525b; --cqt-text-dim: #71717a; --cqt-pri-bg: #18181b; --cqt-pri-fg: #ffffff; --cqt-pri-hover: #27272a; --cqt-pri-kbd-bg: rgba(255,255,255,0.16); --cqt-pri-kbd-bd: rgba(255,255,255,0.32); --cqt-row-sel: rgba(24,24,27,0.055); --cqt-shadow: -10px 10px 28px rgba(15,23,42,0.16), 0 0 0 1px rgba(15,23,42,0.08); --cqt-fc-shadow: 0 20px 54px rgba(15,23,42,0.22), 0 0 0 1px rgba(15,23,42,0.1); }
 #cvat-quicktool-wrapper { position: fixed; top: 80px; right: 0; z-index: 999999; display: flex; align-items: flex-start; transform: translateX(356px); transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1); font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: var(--cqt-text); user-select: none; -webkit-font-smoothing: antialiased; }
-#cvat-quicktool-wrapper.hover-open, #cvat-quicktool-wrapper.pinned { transform: translateX(0) !important; }
 #cvat-quicktool-handle { width: 24px; background: var(--cqt-bg); color: var(--cqt-text-muted); padding: 14px 4px; border: 1px solid var(--cqt-border-btn); border-right: none; border-radius: 6px 0 0 6px; cursor: pointer; font-weight: 600; font-size: 10.5px; letter-spacing: 0.8px; box-shadow: -4px 4px 16px rgba(0,0,0,0.35); writing-mode: vertical-rl; transition: color 0.15s, background 0.15s, border-color 0.15s; }
 #cvat-quicktool-handle:hover { background: var(--cqt-bg-elev); color: var(--cqt-text); border-color: var(--cqt-border-strong); }
-#cvat-quicktool-wrapper.pinned #cvat-quicktool-handle { background: var(--cqt-bg-elev); color: var(--cqt-text); border-color: var(--cqt-border-strong); }
+#cvat-quicktool-handle[aria-expanded="true"] { background: var(--cqt-bg-elev); color: var(--cqt-text); border-color: var(--cqt-border-strong); }
 #cvat-quicktool-panel { width: 356px; background: var(--cqt-bg); color: var(--cqt-text); border: 1px solid var(--cqt-border); border-right: none; border-radius: 8px 0 0 8px; box-shadow: var(--cqt-shadow); overflow: hidden; display: flex; flex-direction: column; max-height: 91vh; }
 #cvat-quicktool-header { padding: 8px 10px; background: var(--cqt-bg); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--cqt-border); cursor: move; }
 #cvat-quicktool-header .title { font-weight: 600; color: var(--cqt-text); display: flex; align-items: center; gap: 6px; font-size: 12px; letter-spacing: -0.01em; }
@@ -11916,21 +11926,22 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 6px 9px 8px; display: f
 
 const PANEL_HTML = `
 <button type="button" id="cvat-quicktool-handle" aria-expanded="false" aria-controls="cvat-quicktool-panel" title="Mở hoặc thu gọn Toolbox (${OPTION_KEY}Q)">Cuboid Toolbox</button>
+<button type="button" id="cqt-sidebar-rail" aria-controls="cvat-quicktool-panel" aria-expanded="false" hidden>Cuboid Toolbox</button>
 <section id="cvat-quicktool-panel" aria-label="Cuboid Toolbox" inert>
-<div id="cvat-quicktool-header" title="Kéo để di chuyển panel theo chiều dọc">
+<div id="cvat-quicktool-header">
 <div class="title">
 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
 <span>Cuboid Toolbox</span>
 </div>
 <div class="actions">
-<button id="cqt-btn-full-control" title="Mở chế độ Full Control đa frame (${KEY_PREFIX}M)">
+<button id="cqt-btn-full-control" title="Mở chế độ Full Control đa frame (${OPTION_KEY}T)">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
 <span>Full</span>
 </button>
 <button id="cqt-btn-theme" title="Đổi giao diện Sáng / Tối (Light / Dark Mode)">
 <span id="cqt-theme-label">Sáng</span>
 </button>
-<button id="cqt-btn-undo-quick" disabled title="Hoàn tác thao tác vừa thực hiện (${KEY_PREFIX}Z)">
+<button id="cqt-btn-undo-quick" disabled title="Hoàn tác thao tác vừa thực hiện (${OPTION_KEY}Z)">
 ${ICONS.undo}
 <span>Undo</span>
 </button>
@@ -11941,10 +11952,10 @@ ${ICONS.redo}
 <button id="cqt-btn-hide-ui" title="Ẩn hoàn toàn giao diện Tool trên màn hình (${KEY_PREFIX}⇧Q hoặc ${KEY_PREFIX}\\)">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
 </button>
-<button id="cqt-btn-pin" title="Ghim / Bỏ ghim panel (${KEY_PREFIX}Q)">
+<button id="cqt-btn-pin" aria-label="Ghim Toolbox" aria-pressed="false" title="Ghim Toolbox để giữ mở khi rời chuột">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg>
 </button>
-<button id="cqt-btn-close" title="Thu gọn">
+<button id="cqt-btn-close" aria-label="Đóng Toolbox" title="Đóng Toolbox và ẩn tab sát viền">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
 </button>
 </div>
@@ -11965,7 +11976,7 @@ ${ICONS.redo}
 <button id="cqt-btn-lock-target" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" title="Khoá Target ID hiện tại (không tự đổi khi click sang box khác)">
 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
 </button>
-<button id="cqt-btn-detect" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Lấy object đang chọn (${KEY_PREFIX}A = Lấy object + Tự dò dải frame)">Auto <span class="cqt-kbd">${KEY_PREFIX}A</span></button>
+<button id="cqt-btn-detect" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Lấy object đang chọn (${OPTION_KEY}A = Lấy object + Tự dò dải frame)">Auto <span class="cqt-kbd">${OPTION_KEY}A</span></button>
 <button id="cqt-btn-add-selection" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Thêm/bớt object vào nhóm chọn nhiều box (Shift/Cmd + Click trên canvas)">Nhóm (<span id="cqt-multi-count">0</span>)</button>
 </div>
 <span class="cqt-label">F <b id="cqt-current-frame" style="color:var(--cqt-text); font-variant-numeric:tabular-nums;">?</b></span>
@@ -11976,7 +11987,7 @@ ${ICONS.redo}
 <span style="color:var(--cqt-text-dim);">→</span>
 <input type="number" id="cqt-frame-end" class="cqt-input" value="0" style="width:52px; height:24px; padding:2px 5px;" title="End Frame" />
 <input type="number" min="1" id="cqt-frame-count" class="cqt-input" value="1" style="width:44px; height:24px; padding:2px 5px;" title="Tổng số frame" />
-<button id="cqt-btn-detect-span" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" style="margin-left:auto;" title="Dò frame đầu/cuối của object trong job (${KEY_PREFIX}A)">Dò dải</button>
+<button id="cqt-btn-detect-span" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" style="margin-left:auto;" title="Dò frame đầu/cuối của object trong job (${OPTION_KEY}A)">Dò dải</button>
 </div>
 <!-- Keyframe Stepper của riêng Target -->
 <div id="cqt-kf-stepper-row" class="cqt-row" style="gap:3px;">
@@ -11993,7 +12004,7 @@ ${ICONS.redo}
 <div class="cqt-hp-bar">
 <span class="cqt-hp-badges" data-act="toggle-pop" title="Bấm để mở rộng kiểm tra từng frame ngay trong Toolbox"></span>
 <div class="cqt-hp-quick" style="margin-left:auto;">
-<button class="cqt-btn cqt-btn-danger cqt-sm" data-act="cut-here" title="Outside: từ frame hiện tại tới hết track (${KEY_PREFIX}X)">${ICONS.eyeOff}<span>Out F→Hết</span></button>
+<button class="cqt-btn cqt-btn-danger cqt-sm" data-act="cut-here" title="Outside: từ frame hiện tại tới hết track (${OPTION_KEY}X)">${ICONS.eyeOff}<span>Out F→Hết</span></button>
 <button class="cqt-btn cqt-btn-secondary cqt-sm cqt-hp-btn-in" data-act="in-to-end" title="Inside: hiện lại từ frame hiện tại tới hết track">${ICONS.eye}<span>In F→Hết</span></button>
 </div>
 <button class="cqt-hp-expand" data-act="toggle-pop" title="Mở rộng / Thu gọn chi tiết kiểm tra Frame, Outside &amp; Inside">${ICONS.chevronDown}</button>
@@ -12077,8 +12088,8 @@ ${ICONS.redo}
 <!-- Cụm 1: Smart Snap & Clipboard -->
 <div class="cqt-card">
 <div class="cqt-row">
-<button id="cqt-btn-smart-snap" class="cqt-btn cqt-btn-primary" title="Hút box (hoặc cả Nhóm) theo cụm điểm LiDAR + xoay yaw + chạm đất (${KEY_PREFIX}P)">Smart Snap <span class="cqt-kbd">${KEY_PREFIX}P</span></button>
-<label class="cqt-check" style="flex:none;" title="Bật: tính lại cả L/W/H theo cụm điểm. Tắt: giữ LWH, bám mặt gần cảm biến."><input type="checkbox" id="cqt-snap-fit-size" /> Fit size</label>
+<button id="cqt-btn-smart-snap" class="cqt-btn cqt-btn-primary" title="Hút box (hoặc cả Nhóm) theo cụm điểm LiDAR + xoay yaw + chạm đất (${OPTION_KEY}P)">Smart Snap <span class="cqt-kbd">${OPTION_KEY}P</span></button>
+<label class="cqt-check" style="flex:none;" title="${FIT_SIZE_HINT}"><input type="checkbox" id="cqt-snap-fit-size" /> Đo lại L/W/H</label>
 </div>
 <div class="cqt-row" style="gap:4px;">
 <button id="cqt-btn-copy-transform" class="cqt-btn cqt-btn-secondary cqt-sm" title="Copy toạ độ, góc xoay và LWH của box">Copy Box</button>
@@ -12090,7 +12101,7 @@ ${ICONS.redo}
 <div class="cqt-card">
 <div class="cqt-row" style="justify-content:space-between;">
 <span class="cqt-h">Kích thước LWH (m)</span>
-<button id="cqt-btn-get-lwh" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xác nhận lấy LWH thực tế từ box đang chọn (${KEY_PREFIX}C)">Lấy size <span class="cqt-kbd">${KEY_PREFIX}C</span></button>
+<button id="cqt-btn-get-lwh" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xác nhận lấy LWH thực tế từ box đang chọn (${OPTION_KEY}C)">Lấy size <span class="cqt-kbd">${OPTION_KEY}C</span></button>
 </div>
 <div class="cqt-row" style="gap:4px;">
 <select id="cqt-preset-select" class="cqt-input" style="height:25px; padding:2px 6px;" title="Preset LWH theo label"></select>
@@ -12126,7 +12137,7 @@ ${ICONS.redo}
 <div class="cqt-row" style="gap:4px;">
 <button id="cqt-btn-apply-frame" class="cqt-btn cqt-btn-secondary" title="Chỉ sửa LWH tại frame hiện tại">Frame này</button>
 <button id="cqt-btn-apply-lwh" class="cqt-btn cqt-btn-secondary" title="Áp dụng LWH cho dải Start–End">Dải Start–End</button>
-<button id="cqt-btn-sync-track" class="cqt-btn cqt-btn-primary" title="Đồng bộ LWH cho mọi keyframe toàn track (${KEY_PREFIX}D)">Toàn track <span class="cqt-kbd">${KEY_PREFIX}D</span></button>
+<button id="cqt-btn-sync-track" class="cqt-btn cqt-btn-primary" title="Đồng bộ LWH cho mọi keyframe toàn track (${OPTION_KEY}S)">Toàn track <span class="cqt-kbd">${OPTION_KEY}S</span></button>
 </div>
 </div>
 <!-- Cụm 3: Sub-label (Thuộc tính) -->
@@ -12156,90 +12167,60 @@ ${ICONS.redo}
 <!-- ================= 2. GROUND (CHIA 2 BƯỚC RÕ RÀNG) ================= -->
 <div class="cqt-pane" data-pane="ground">
 <div class="cqt-card">
-<span class="cqt-h">Nguồn mặt đường</span>
-<div id="cqt-plane-display" class="cqt-hint" style="background:var(--cqt-bg-input); padding:6px 8px; border-radius:5px; border:1px solid var(--cqt-border);">Chưa có mặt đất — chọn nguồn bên dưới hoặc bấm ${KEY_PREFIX}H.</div>
-<div class="cqt-row" style="gap:4px;">
-<button id="cqt-btn-calc-plane" class="cqt-btn cqt-btn-secondary cqt-sm" title="Fit mặt phẳng dốc 3D từ point cloud quanh box">Từ Cloud</button>
-<button id="cqt-btn-ground-ref-boxes" class="cqt-btn cqt-btn-secondary cqt-sm" title="Dựng mặt phẳng dốc 3D từ xe chuẩn (Anchor) ở frame hiện tại">Từ Anchor</button>
-<button id="cqt-btn-ground-prev-frame" class="cqt-btn cqt-btn-secondary cqt-sm" title="Lấy lại mặt phẳng đất của frame liền trước">Frame trước</button>
+<span class="cqt-h">Fit Ground</span>
+<div class="cqt-row cqt-wrap cqt-ground-controls">
+${groundFitSelect('cqt-ground-kind', 'Nguồn và phạm vi', GROUND_FIT_CHOICES)}
+${groundFitSelect('cqt-ground-scope', 'Phạm vi dải', {
+ current_to_end: 'Frame này → Hết dải', whole: 'Toàn dải Start–End', keyframes: 'Chỉ keyframe dải', current: 'Chỉ frame hiện tại',
+})}
+${groundFitSelect('cqt-ground-mode', 'Cách đặt', GROUND_FIT_MODES)}
+${groundFitSelect('cqt-ground-direction', 'Hướng', GROUND_FIT_DIRECTIONS)}
+<button id="cqt-btn-ground-fit" class="cqt-btn cqt-btn-primary">Fit chạm đất</button>
 </div>
-<details class="cqt-disclosure">
+<p id="cqt-ground-anchor-hint" class="cqt-hint" hidden>Mỗi frame dùng Anchor đầu tiên còn hiện trong danh sách ưu tiên. Frame thiếu Anchor sẽ xuất hiện bên dưới.</p>
+<div id="cqt-ground-result" class="cqt-ground-result" role="status" hidden></div>
+<details id="cqt-ground-anchor-controls" class="cqt-disclosure">
 <summary>Anchor và Z thủ công</summary>
 <!-- Danh sách Anchor tương tác (Chips) -->
 <div class="cqt-col" style="gap:4px; margin-top:4px;">
 <div class="cqt-row" style="justify-content:space-between;">
 <span class="cqt-label" style="color:var(--cqt-text); font-weight:600;">Anchor mặt đất (Xe chuẩn)</span>
 <div class="cqt-row" style="gap:4px;">
-<button id="cqt-btn-anchor-pick-hover" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Trỏ chuột vào cuboid bất kỳ trên 3D rồi bấm ${KEY_PREFIX}B để thêm/bỏ Anchor">+ Trỏ <span class="cqt-kbd">${KEY_PREFIX}B</span></button>
-<button id="cqt-btn-anchor-clear" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xoá toàn bộ danh sách Anchor (${KEY_PREFIX}⇧B)">Xoá hết</button>
+<button id="cqt-btn-anchor-pick-hover" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Trỏ chuột vào cuboid bất kỳ trên 3D rồi bấm ${OPTION_KEY}B để thêm/bỏ Anchor">+ Trỏ <span class="cqt-kbd">${OPTION_KEY}B</span></button>
+<button id="cqt-btn-anchor-clear" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xoá toàn bộ danh sách Anchor (${OPTION_KEY}Shift+B)">Xoá hết</button>
 </div>
 </div>
 <div id="cqt-anchor-chips" class="cqt-row cqt-wrap" style="gap:4px; min-height:22px;"></div>
 <div class="cqt-row">
 <div class="cqt-col" style="flex:1.3;">
 <span class="cqt-label">Nhập mã ID (chuỗi ưu tiên)</span>
-<input type="text" id="cqt-ground-ref-ids" class="cqt-input" placeholder="vd: 1 hoặc 1, 4" title="Nhập 1 xe chuẩn hoặc chuỗi kế nhiệm (vd: 1, 4) hoặc bấm ${KEY_PREFIX}B" />
+<input type="text" id="cqt-ground-ref-ids" class="cqt-input" placeholder="vd: 1 hoặc 1, 4" title="Nhập 1 xe chuẩn hoặc chuỗi kế nhiệm (vd: 1, 4) hoặc bấm ${OPTION_KEY}B" />
 </div>
 <div class="cqt-col" style="flex:1;">
 <span class="cqt-label">Hoặc Z phẳng (m)</span>
 <input type="number" step="0.01" id="cqt-ground-z" class="cqt-input" placeholder="vd: -1.70" />
 </div>
 </div>
- <!-- Khung cảnh báo mất Anchor -->
-<div id="cqt-anchor-missing-box" class="cqt-col" style="display:none; margin-top:4px; padding:6px; background:rgba(168,85,247,0.08); border:1px solid rgba(168,85,247,0.35); border-radius:5px; gap:4px;"></div>
 </div>
 </details>
-</div>
-<div class="cqt-card">
-<span class="cqt-h">Fit Ground</span>
-<div class="cqt-row">
-<div class="cqt-col">
-<span class="cqt-label">Cách đặt</span>
-<select id="cqt-ground-mode" class="cqt-input">
-<option value="snap">Snap đáy (giữ nghiêng)</option>
-<option value="flat">Đặt phẳng (rx=ry=0)</option>
-<option value="tilt">Nghiêng theo dốc</option>
-</select>
-</div>
-<div class="cqt-col">
-<span class="cqt-label">Phạm vi dải</span>
-<select id="cqt-ground-scope" class="cqt-input">
-<option value="current_to_end">Frame này → Hết dải</option>
-<option value="whole">Toàn dải Start–End</option>
-<option value="keyframes">Chỉ keyframe dải</option>
-<option value="current">Chỉ frame hiện tại</option>
-</select>
-</div>
-<div class="cqt-col" style="flex:0.75;">
-<span class="cqt-label">Hướng</span>
-<select id="cqt-ground-direction" class="cqt-input">
-<option value="both">Cả hai</option>
-<option value="down">Chỉ hạ</option>
-<option value="up">Chỉ nâng</option>
-</select>
-</div>
-</div>
-<label class="cqt-check" title="Khi thiếu điểm cloud hoặc Anchor bị outside sẽ tự kế thừa plane hợp lệ trước đó"><input type="checkbox" id="cqt-ground-auto-fallback" checked /> Tự kế thừa plane frame trước khi mất cloud / Anchor</label>
+<details class="cqt-disclosure">
+<summary>Mặt phẳng đã lưu và đo đáy</summary>
+<div id="cqt-plane-display" class="cqt-hint" style="background:var(--cqt-bg-input); padding:6px 8px; border-radius:5px; border:1px solid var(--cqt-border);">Chưa có mặt phẳng. Chọn nguồn bên dưới nếu cần dùng lại một mặt phẳng.</div>
 <div class="cqt-row" style="gap:4px;">
-<button id="cqt-btn-apply-ground-frame" class="cqt-btn cqt-btn-primary" title="Hạ chạm đất tại frame hiện tại theo plane đang lưu (hoặc bấm ${KEY_PREFIX}H tự đo cloud cục bộ)">Fit Frame này <span class="cqt-kbd">${KEY_PREFIX}H</span></button>
-<button id="cqt-btn-apply-ground" class="cqt-btn cqt-btn-secondary" title="Fit Target trong phạm vi dải theo plane đang lưu ở Bước 1">Fit dải (plane Bước 1)</button>
-<button id="cqt-btn-check-ground" class="cqt-btn cqt-btn-secondary cqt-none" title="Đo độ lệch đáy của track so với mặt đất trong dải">Đo đáy</button>
+<button id="cqt-btn-calc-plane" class="cqt-btn cqt-btn-secondary cqt-sm" title="Fit mặt phẳng dốc 3D từ point cloud quanh box">Từ Cloud</button>
+<button id="cqt-btn-ground-ref-boxes" class="cqt-btn cqt-btn-secondary cqt-sm" title="Dựng mặt phẳng dốc 3D từ xe chuẩn (Anchor) ở frame hiện tại">Từ Anchor</button>
+<button id="cqt-btn-ground-prev-frame" class="cqt-btn cqt-btn-secondary cqt-sm" title="Lấy lại mặt phẳng đất của frame liền trước">Frame trước</button>
 </div>
-<div class="cqt-row" style="gap:4px;">
-<button id="cqt-btn-ground-follow-ref" class="cqt-btn cqt-btn-secondary" title="Duyệt dải bám theo chuỗi Anchor (siêu nhanh <0.5s), chỉ fit cho Target / Nhóm đang chọn">Bám Anchor dải</button>
-<button id="cqt-btn-ground-sweep-cloud" class="cqt-btn cqt-btn-secondary" title="Tự chuyển từng frame để nạp cloud và fit mặt đất độc lập (chuẩn xác 100% theo LiDAR)">Quét Cloud dải</button>
-</div>
-<div class="cqt-divider"></div>
+<label class="cqt-check"><input type="checkbox" id="cqt-ground-auto-fallback" checked /> Kế thừa mặt phẳng trước khi lấy nguồn từ Cloud bị thiếu</label>
 <div class="cqt-row cqt-wrap">
-<button id="cqt-btn-lidar-ground-frame" class="cqt-btn cqt-btn-secondary" title="Fit theo mặt đường quanh gốc LiDAR (${KEY_PREFIX}L)">Gốc LiDAR · frame</button>
-<button id="cqt-btn-lidar-ground-range" class="cqt-btn cqt-btn-secondary" title="Fit theo gốc LiDAR từng frame trong dải (${KEY_PREFIX}Shift+L)">Gốc LiDAR · dải</button>
+<button id="cqt-btn-apply-ground" class="cqt-btn cqt-btn-secondary">Áp mặt phẳng đã lưu</button>
+<button id="cqt-btn-check-ground" class="cqt-btn cqt-btn-secondary cqt-none">Đo đáy</button>
 </div>
+</details>
 <details class="cqt-disclosure">
 <summary>Tuỳ chỉnh gốc LiDAR</summary>
 <div class="cqt-row cqt-wrap">
-<label class="cqt-col"><span class="cqt-label">X (m)</span><input id="cqt-lidar-origin-x" type="number" step="0.01" class="cqt-input" placeholder="Tự động" /></label>
-<label class="cqt-col"><span class="cqt-label">Y (m)</span><input id="cqt-lidar-origin-y" type="number" step="0.01" class="cqt-input" placeholder="Tự động" /></label>
-<label class="cqt-col"><span class="cqt-label">Bán kính (m)</span><input id="cqt-lidar-ground-radius" type="number" min="3" max="12" step="0.5" value="6" class="cqt-input" /></label>
+${lidarGroundFields()}
 </div>
 <p class="cqt-hint">Để trống X và Y để tự xác định tâm. Dùng X/Y thủ công khi cloud theo hệ tọa độ thế giới và đã biết vị trí cảm biến.</p>
 </details>
@@ -12273,13 +12254,13 @@ ${ICONS.redo}
 <span class="cqt-label">Góc đầu: <b id="cqt-val-yaw" style="color:var(--cqt-text);">--</b> (<span id="cqt-val-yaw-rad">--</span>)</span>
 <span class="cqt-label">Hướng đi: <b id="cqt-val-motion" style="color:var(--cqt-text);">--</b></span>
 </div>
-<div id="cqt-val-deviation" style="font-weight:500; font-size:11px; color:var(--cqt-text-muted);">Chọn object hoặc bấm Auto (${KEY_PREFIX}A) để đo độ lệch hướng</div>
+<div id="cqt-val-deviation" style="font-weight:500; font-size:11px; color:var(--cqt-text-muted);">Chọn object hoặc bấm Auto (${OPTION_KEY}A) để đo độ lệch hướng</div>
 <div class="cqt-row" style="gap:4px;">
-<button id="cqt-btn-quick-fix-heading" class="cqt-btn cqt-btn-primary cqt-sm" title="Xoay đầu theo hướng di chuyển tại frame hiện tại (${KEY_PREFIX}Phift+R)">Nắn theo hướng đi</button>
+<button id="cqt-btn-quick-fix-heading" class="cqt-btn cqt-btn-primary cqt-sm" title="Xoay đầu theo hướng di chuyển tại frame hiện tại (${OPTION_KEY}Phift+R)">Nắn theo hướng đi</button>
 <button id="cqt-btn-quick-fix-cloud" class="cqt-btn cqt-btn-secondary cqt-sm" title="Xoay theo cạnh cụm điểm LiDAR tại frame hiện tại">Nắn theo Cloud</button>
 </div>
 <div class="cqt-row" style="gap:4px;">
-<button data-rotate="180" class="cqt-btn cqt-btn-secondary cqt-sm" title="Lật ngược đầu xe 180° (${KEY_PREFIX}R)">180° <span class="cqt-kbd">${KEY_PREFIX}R</span></button>
+<button data-rotate="180" class="cqt-btn cqt-btn-secondary cqt-sm" title="Lật ngược đầu xe 180° (${OPTION_KEY}R)">180° <span class="cqt-kbd">${OPTION_KEY}R</span></button>
 <button data-rotate="90" class="cqt-btn cqt-btn-secondary cqt-sm">+90°</button>
 <button data-rotate="-90" class="cqt-btn cqt-btn-secondary cqt-sm">-90°</button>
 <input type="number" step="1" id="cqt-rotate-deg" class="cqt-input" value="180" style="width:52px; height:24px; padding:2px 4px;" title="Số độ xoay tuỳ chỉnh" />
@@ -12447,7 +12428,7 @@ ${ICONS.redo}
 </div>
 <div id="cqt-qa-result" class="cqt-log">Chưa quét. Bấm "Quét QA". Bấm vào một dòng để nhảy tới lỗi.</div>
 <div class="cqt-card">
-<span class="cqt-h">Lịch sử Snapshot (${KEY_PREFIX}Z hoàn tác nhanh)</span>
+<span class="cqt-h">Lịch sử Snapshot (${OPTION_KEY}Z hoàn tác nhanh)</span>
 <div class="cqt-row">
 <select id="cqt-snap-select" class="cqt-input"></select>
 <button id="cqt-btn-snap-restore" class="cqt-btn cqt-btn-secondary cqt-none">Khôi phục</button>
@@ -12465,14 +12446,22 @@ ${ICONS.redo}
 <label class="cqt-check" title="Cho phép cố định Mặt trước/sau/trái/phải/cảm biến khi đổi LWH"><input type="checkbox" id="cqt-set-anchor-resize" /> Cho phép chọn mặt neo (Anchor Face) khi đổi LWH</label>
 <label class="cqt-check" title="Hiện bảng nhích toạ độ cục bộ (Tiến/Lùi/Trái/Phải) và nút Nội suy tuyến tính dải"><input type="checkbox" id="cqt-set-micro-nudge" /> Bật cụm Nhích vi chỉnh &amp; Nội suy tuyến tính</label>
 <label class="cqt-check" title="Không tự chuyển qua nhiều frame (CVAT sẽ tải dữ liệu frame từ server), không đọc tên file frame, không xuất CSV, không lưu toạ độ box vào localStorage"><input type="checkbox" id="cqt-set-safe-data" /> <b>Chế độ an toàn dữ liệu</b> (không tự tải thêm dữ liệu từ server)</label>
-<label class="cqt-check" title="Đè TOP / SIDE / FRONT kiểu Full Control lên 3 ô nhìn phụ của CVAT. Lăn chuột = frame trước/sau của object (${KEY_PREFIX}V)"><input type="checkbox" id="cqt-set-dock-views" /> Ô nhìn nhúng TOP / SIDE / FRONT trên layout CVAT</label>
-<label class="cqt-check" title="Bảng Location / Rotation / Dimensions sửa được ở góc ô 3D, kiểu N-panel của Blender (${KEY_PREFIX}N)"><input type="checkbox" id="cqt-set-item-panel" /> Bảng Item (toạ độ / góc / kích thước) trên ô 3D</label>
+<label class="cqt-check" title="Đè TOP / SIDE / FRONT kiểu Full Control lên 3 ô nhìn phụ của CVAT. Lăn chuột = frame trước/sau của object (${OPTION_KEY}V)"><input type="checkbox" id="cqt-set-dock-views" /> Ô nhìn nhúng TOP / SIDE / FRONT trên layout CVAT</label>
+<label class="cqt-check" title="Bảng Location / Rotation / Dimensions sửa được ở góc ô 3D, kiểu N-panel của Blender (${OPTION_KEY}N)"><input type="checkbox" id="cqt-set-item-panel" /> Bảng Item (toạ độ / góc / kích thước) trên ô 3D</label>
 <label class="cqt-check"><input type="checkbox" id="cqt-set-blender" /> Bật G / W / S khi con trỏ trên canvas 3D</label>
 <label class="cqt-check" title="Dùng khi canvas không tự cập nhật sau khi sửa"><input type="checkbox" id="cqt-set-bounce" /> Làm mới canvas bằng chuyển frame (dự phòng)</label>
 </div>
 <details class="cqt-card cqt-disclosure">
 <summary>Phím tắt Toolbox</summary>
-<p class="cqt-hint">Bấm <b>${KEY_PREFIX.split(' → ')[0]}</b>, nhả ra, rồi bấm lệnh trong 2,4 giây. Esc để huỷ. ${OPTION_KEY}Q mở panel ngay.</p>
+<div class="cqt-keymap-grid">
+<kbd class="cqt-kbd">${OPTION_KEY}Q / T / V / W / N</kbd><span>Toolbox / Full Control / ô nhìn nhúng / QA/QC / Item</span>
+<kbd class="cqt-kbd">${OPTION_KEY}A / B / P / C</kbd><span>Dò track / đánh dấu Anchor / Smart Snap / chốt LWH</span>
+<kbd class="cqt-kbd">${OPTION_KEY}H / G</kbd><span>Fit theo mặt Point Cloud / gốc LiDAR. Thêm Shift để áp theo dải.</span>
+<kbd class="cqt-kbd">${OPTION_KEY}Y</kbd><span>Fit theo Anchor của từng frame trong dải</span>
+<kbd class="cqt-kbd">${OPTION_KEY}S / R / X / Z</kbd><span>Đồng bộ LWH / lật 180° / Outside tới hết / Undo</span>
+<kbd class="cqt-kbd">${OPTION_KEY}Shift+B / P / S / R / X / Z</kbd><span>Bỏ Anchor / Snap và đo LWH / đồng bộ dải / nắn hướng / Outside frame / Redo</span>
+</div>
+<p class="cqt-hint">Phím dự phòng: bấm <b>${KEY_PREFIX.split(' → ')[0]}</b>, nhả ra, rồi bấm lệnh dưới đây trong 2,4 giây. Esc để huỷ.</p>
 <p class="cqt-hint" id="cqt-shortcut-conflict" hidden>Tiền tố trùng với một phím CVAT đã cấu hình. Đổi phím đó trong CVAT để dùng chuỗi Toolbox.</p>
 <div class="cqt-keymap-grid">
 <kbd class="cqt-kbd">Q / Shift+Q / &#92;</kbd><span>Mở hoặc thu gọn panel / ẩn hoặc hiện toàn bộ Toolbox (Stealth)</span>
@@ -12480,9 +12469,9 @@ ${ICONS.redo}
 <kbd class="cqt-kbd">U</kbd><span>Mở không gian QA/QC</span>
 <kbd class="cqt-kbd">A</kbd><span>Chọn object hiện tại và dò dải track</span>
 <kbd class="cqt-kbd">B / Shift+B</kbd><span>Thêm hoặc bỏ Anchor dưới con trỏ / bỏ toàn bộ Anchor</span>
-<kbd class="cqt-kbd">P / Shift+P</kbd><span>Smart Snap / Smart Snap kèm Fit size</span>
-<kbd class="cqt-kbd">H / Shift+H</kbd><span>Fit đất quanh box ở frame hiện tại / fit dải theo plane đã chọn</span>
-<kbd class="cqt-kbd">L / Shift+L</kbd><span>Fit mặt đất theo gốc LiDAR ở frame hiện tại / từng frame trong dải</span>
+<kbd class="cqt-kbd">P / Shift+P</kbd><span>Smart Snap / Smart Snap kèm đo lại L/W/H</span>
+<kbd class="cqt-kbd">H / Shift+H</kbd><span>Fit mặt Point Cloud ở frame hiện tại / từng frame trong dải</span>
+<kbd class="cqt-kbd">L / Shift+L / E</kbd><span>Fit theo gốc LiDAR một frame / cả dải / fit dải theo Anchor</span>
 <kbd class="cqt-kbd">C / D / Shift+D</kbd><span>Chốt LWH / đồng bộ toàn track / áp vào dải</span>
 <kbd class="cqt-kbd">R / Shift+R</kbd><span>Lật 180° / nắn hướng di chuyển tại frame hiện tại</span>
 <kbd class="cqt-kbd">, / .</kbd><span>Keyframe trước / sau của object</span>
@@ -12541,7 +12530,7 @@ function togglePanel() {
   root.classList.remove("cqt-stealth-ui");
   syncDockSettingsUI();
   dockTick(true);
-  panelApi?.setPinned(true);
+  panelApi?.setState('peek');
   setStatus("Đã hiện lại giao diện Tool & mở Panel.", "info");
   return;
  }
@@ -12555,7 +12544,7 @@ function toggleStealthUI() {
  syncDockSettingsUI();
  if (stealthUI) {
   pointerInTool = false;
-  panelApi?.setPinned(false);
+  panelApi?.setState('closed');
   if (fc.open) closeFullControl();
   dockLayout();
   setStatus(`Đã ẩn toàn bộ giao diện Tool — phím tắt vẫn hoạt động (${KEY_PREFIX}⇧Q hoặc ${KEY_PREFIX}\\ để hiện lại).`, "info");
@@ -12611,12 +12600,12 @@ function createUI() {
  }
  const wrapper = document.createElement("div");
  wrapper.id = "cvat-quicktool-wrapper";
+ wrapper.dataset.sidebarState = "closed";
  wrapper.innerHTML = PANEL_HTML;
  root.appendChild(wrapper);
 
  bindPanel(wrapper);
  bindActions(wrapper);
- restorePanelTop(wrapper);
  writeQAOptionsToUI();
  const s = getSettings();
  applyTheme(s.theme === "light" ? "light" : "dark");
@@ -12627,9 +12616,6 @@ function createUI() {
  syncDockSettingsUI();
  $("cqt-set-safe-data").checked = safeData();
  $("cqt-set-blender").checked = !!s.blenderKeys;
- setField('cqt-lidar-ground-radius', s.lidarGroundRadius);
- setField('cqt-lidar-origin-x', s.lidarOriginX);
- setField('cqt-lidar-origin-y', s.lidarOriginY);
  $("cqt-set-bounce").checked = !!s.bounceRefresh;
  $("cqt-limit-clamp-on-apply").checked = !!s.enforceLimits;
  const qaDetails = $("cqt-qa-details");
@@ -12668,42 +12654,94 @@ function bindPanel(wrapper) {
   toolbar.appendChild(projectionButton);
  }
  const panel = wrapper.querySelector("#cvat-quicktool-panel");
- const setPinned = (on) => {
-  if (!on && panel.contains(document.activeElement)) launcher.focus({ preventScroll: true });
-  launcher.setAttribute('aria-expanded', String(on));
-  pinBtn.setAttribute('aria-pressed', String(on));
-  panel.inert = !on;
-  if (!on && fc.toolsOpen) {
-   fc.toolsOpen = false;
-   root.classList.remove('cqt-fc-tools-open');
-   $('cqt-fc-tools')?.setAttribute('aria-pressed', 'false');
+ const rail = wrapper.querySelector('#cqt-sidebar-rail');
+ let collapseTimer;
+ const getState = () => wrapper.dataset.sidebarState;
+ const setState = (state) => {
+  clearTimeout(collapseTimer);
+  const open = state === 'peek' || state === 'pinned';
+  const pinned = state === 'pinned';
+  if (state === 'closed' && (panel.contains(document.activeElement) || document.activeElement === rail)) {
+   const fallback = fc.open ? $('cqt-fc-tools') : launcher;
+   fallback?.focus({ preventScroll: true });
   }
-  wrapper.classList.toggle("pinned", on);
+  wrapper.dataset.sidebarState = state;
+  wrapper.classList.toggle('is-open', open);
+  launcher.setAttribute('aria-expanded', String(open));
+  rail.hidden = state !== 'collapsed';
+  pinBtn.setAttribute('aria-pressed', String(pinned));
+  pinBtn.setAttribute('aria-label', pinned ? 'Bỏ ghim Toolbox' : 'Ghim Toolbox');
+  pinBtn.title = pinned ? 'Bỏ ghim để tự thu khi rời chuột' : 'Ghim Toolbox để giữ mở khi rời chuột';
+  pinBtn.classList.toggle('active', pinned);
+  panel.inert = !open;
+  if (!open) {
+   pointerInTool = false;
+   if (fc.toolsOpen) {
+    fc.toolsOpen = false;
+    root.classList.remove('cqt-fc-tools-open');
+    $('cqt-fc-tools')?.setAttribute('aria-pressed', 'false');
+   }
+  }
   dockLayout();
-  pinBtn.classList.toggle("active", on);
-  wrapper.classList.remove("hover-open");
-  return on;
+  return open;
+ };
+ const queueCollapse = (delay) => {
+  clearTimeout(collapseTimer);
+  collapseTimer = setTimeout(() => {
+   if (getState() !== 'peek' || pointerInTool) return;
+   const focus = document.activeElement;
+   if (panel.contains(focus) && focus.matches('input, textarea, select, :focus-visible')) return;
+   setState('collapsed');
+  }, delay);
+ };
+ const peek = () => {
+  setState('peek');
+  queueCollapse(1400);
+  return true;
  };
  panelApi = {
-  setPinned,
+  getState,
+  setState,
   toggle() {
-   return setPinned(!wrapper.classList.contains("pinned"));
+   return getState() === 'peek' || getState() === 'pinned' ? setState('closed') : peek();
   },
  };
-
- wrapper.addEventListener("mouseenter", () => { pointerInTool = true; });
- wrapper.addEventListener("mouseleave", () => {
+ wrapper.addEventListener('pointerenter', () => {
+  pointerInTool = true;
+  clearTimeout(collapseTimer);
+ });
+ wrapper.addEventListener('pointerleave', () => {
   pointerInTool = false;
+  if (getState() === 'peek') queueCollapse(260);
   const act = activeId();
   if (act !== null) lastSyncedObjId = act;
   pendingObj = { id: null, t: 0 };
+ });
+ panel.addEventListener('focusout', () => {
+  if (getState() === 'peek' && !pointerInTool) queueCollapse(260);
+ });
+ rail.addEventListener('pointerenter', (e) => {
+  if (e.pointerType === 'mouse') peek();
+ });
+ rail.addEventListener('click', () => {
+  peek();
+  pinBtn.focus({ preventScroll: true });
+ });
+ panel.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !isTyping(e)) {
+   swallow(e);
+   setState('closed');
+  }
  });
  for (const type of ["pointerdown", "pointermove", "pointerover", "pointerout", "mousedown", "mousemove",
   "mouseover", "mouseout", "click", "dblclick", "contextmenu", "wheel"]) {
   wrapper.addEventListener(type, (e) => e.stopPropagation());
  }
- pinBtn.addEventListener("click", () => setPinned(!wrapper.classList.contains("pinned")));
- wrapper.querySelector("#cqt-btn-close").addEventListener("click", () => setPinned(false));
+ pinBtn.addEventListener('click', () => {
+  if (getState() === 'pinned') peek();
+  else setState('pinned');
+ });
+ wrapper.querySelector('#cqt-btn-close').addEventListener('click', () => setState('closed'));
  launcher.addEventListener("click", togglePanel);
 
  wrapper.querySelectorAll(".cqt-tab").forEach((tab) => {
@@ -12716,26 +12754,6 @@ function bindPanel(wrapper) {
   });
  });
 
- const header = wrapper.querySelector("#cvat-quicktool-header");
- let drag = null;
- header.addEventListener("mousedown", (e) => {
-  if (e.target.closest("button")) return;
-  drag = { y: e.clientY, top: parseInt(getComputedStyle(wrapper).top, 10) || 80 };
- });
- listen(window, "mousemove", (e) => {
-  if (!drag) return;
-  wrapper.style.top = `${clamp(drag.top + e.clientY - drag.y, 0, window.innerHeight - 80)}px`;
- }, true);
- listen(window, "mouseup", () => {
-  if (!drag) return;
-  drag = null;
-  lsSet(LS.top, parseInt(wrapper.style.top, 10) || 80);
- }, true);
-}
-
-function restorePanelTop(wrapper) {
- const top = lsGet(LS.top, null);
- if (Number.isFinite(top)) wrapper.style.top = `${clamp(top, 0, window.innerHeight - 80)}px`;
 }
 
 function guarded(fn) {
@@ -12862,32 +12880,14 @@ function bindActions(wrapper) {
    }
   }));
  }
- const anchorMissingBox = wrapper.querySelector("#cqt-anchor-missing-box");
- if (anchorMissingBox) {
-  anchorMissingBox.addEventListener("click", guarded(async (e) => {
-   const btn = e.target.closest("[data-anchor-jump]");
-   if (btn) {
-    const f = Number(btn.dataset.anchorJump);
-    if (Number.isInteger(f)) {
-     await goToFrame(f);
-     await dockTick(true);
-    }
-   }
-  }));
- }
+ bindGroundMissing($('cqt-ground-result'));
  on("cqt-ground-z", onGroundZInput, "change");
  on("cqt-btn-check-ground", checkGround);
- on("cqt-btn-apply-ground-frame", () => applyGroundFitCurrent());
- on("cqt-btn-lidar-ground-frame", () => applyGroundFitCurrent(true));
  on("cqt-btn-apply-ground", applyGroundFit);
- on("cqt-btn-ground-sweep-cloud", () => groundSweepCloud());
- on("cqt-btn-lidar-ground-range", () => groundSweepCloud(true));
- for (const [id, setting] of [
-  ['cqt-lidar-ground-radius', 'lidarGroundRadius'],
-  ['cqt-lidar-origin-x', 'lidarOriginX'],
-  ['cqt-lidar-origin-y', 'lidarOriginY'],
- ]) on(id, (event) => lsSet(LS.settings, { ...getSettings(), [setting]: event.target.value }), 'change');
- on("cqt-btn-ground-follow-ref", groundFollowReference);
+ on("cqt-btn-ground-fit", () => runGroundFit(val('cqt-ground-kind')));
+ on("cqt-ground-kind", () => syncGroundFitControls(false), 'change');
+ syncGroundFitControls(false);
+ bindLidarGroundFields(on);
 
  // Tab 3: Track (Yaw, Keyframe, Re-interpolate, Outside, Shift)
  on("cqt-btn-quick-fix-heading", alignYawCurrentFrame);
