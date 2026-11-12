@@ -133,7 +133,9 @@ const LS = {
  classGroups: 'cqt_class_groups_v1',
  attrProfiles: 'cqt_attr_profiles_v1',
  fcBounds: 'cqt_full_control_v1',
- healthPos: 'cqt_health_pos_v1',
+ healthPos: 'cqt_health_viewport_pos_v1',
+ legacyHealthPos: 'cqt_health_pos_v1',
+ itemPos: 'cqt_item_viewport_pos_v1',
 };
 
 // Ngưỡng LWH tiêu chuẩn theo class (m)
@@ -10186,6 +10188,7 @@ for (const f of ITEM_FIELDS) {
 
 const item = {
  el: null,
+ position: lsGet(LS.itemPos, null),
  scrub: null, // { field, sx, v0, moved }
 };
 
@@ -10311,7 +10314,64 @@ function dockBindView(e, view) {
  for (const type of ['click', 'contextmenu', 'pointerdown']) box.addEventListener(type, (ev) => ev.stopPropagation());
 }
 
-// ---- Bố cục: phủ đúng lên 3 ô nhìn của CVAT, bảng Item ở góc phải ô 3D ----
+function placeFloatingHud(el, x, y) {
+ const margin = 8;
+ const left = Math.round(clamp(x, margin, Math.max(margin, window.innerWidth - el.offsetWidth - margin)));
+ const top = Math.round(clamp(y, margin, Math.max(margin, window.innerHeight - el.offsetHeight - margin)));
+ el.style.left = `${left}px`;
+ el.style.top = `${top}px`;
+ return { x: left, y: top };
+}
+
+function bindHudGrip(hud, key) {
+ const grip = hud.el.querySelector('.cqt-hud-grip');
+ let drag = null;
+ grip.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || !event.isPrimary) return;
+  event.preventDefault();
+  event.stopPropagation();
+  grip.setPointerCapture(event.pointerId);
+  const { left, top } = hud.el.getBoundingClientRect();
+  drag = {
+   pointerId: event.pointerId,
+   offsetX: event.clientX - left,
+   offsetY: event.clientY - top,
+   previous: hud.position,
+   startX: event.clientX,
+   startY: event.clientY,
+  };
+ });
+ grip.addEventListener('pointermove', (event) => {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 3) return;
+  drag.moved = true;
+  hud.position = placeFloatingHud(hud.el, event.clientX - drag.offsetX, event.clientY - drag.offsetY);
+ });
+ grip.addEventListener('pointerup', (event) => {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  if (drag.moved) lsSet(key, hud.position);
+  drag = null;
+ });
+ grip.addEventListener('lostpointercapture', (event) => {
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  hud.position = drag.previous;
+  drag = null;
+  dockLayout();
+ });
+ grip.addEventListener('keydown', (event) => {
+  const direction = {
+   ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
+  }[event.key];
+  if (!direction || event.altKey || event.ctrlKey || event.metaKey) return;
+  swallow(event);
+  const { left, top } = hud.el.getBoundingClientRect();
+  const step = event.shiftKey ? 32 : 8;
+  hud.position = placeFloatingHud(hud.el, left + direction[0] * step, top + direction[1] * step);
+  lsSet(key, hud.position);
+ });
+}
+
+// ---- Bố cục: phủ ô nhìn của CVAT và định vị hai HUD độc lập ----
 function dockLayout() {
  const onJob = !!getJob();
  const hasTarget = Number.isInteger(resolveTargetId());
@@ -10346,8 +10406,7 @@ function dockLayout() {
    const panelLeft = panel && !panel.inert ? panel.getBoundingClientRect().left : window.innerWidth;
    const right = Math.min(host.r.right, panelLeft);
    const left = Math.max(host.r.left + 8, right - item.el.offsetWidth - 8);
-   item.el.style.left = `${left}px`;
-   item.el.style.top = `${host.r.top + 8}px`;
+   placeFloatingHud(item.el, item.position?.x ?? left, item.position?.y ?? host.r.top + 8);
   }
  }
  healthLayout(onJob && hasTarget);
@@ -10581,12 +10640,15 @@ function itemCreate() {
  el.id = 'cqt-item-panel';
  el.style.display = 'none';
  let html = `
-  <div class="cqt-item-head" title="Bấm để thu gọn / mở rộng (${OPTION_KEY}N bật/tắt bảng)">
-   <span class="cqt-item-title">Item</span>
-   <span class="cqt-item-obj">--</span>
-   <span class="cqt-item-caret">▾</span>
+  <div class="cqt-item-titlebar">
+   <button type="button" class="cqt-hud-grip" aria-label="Di chuyển bảng Item" title="Kéo bảng Item hoặc dùng phím mũi tên">${ICONS.grip}</button>
+   <button type="button" class="cqt-item-head" aria-controls="cqt-item-body" title="Thu gọn / mở rộng bảng Item (${OPTION_KEY}N bật/tắt bảng)">
+    <span class="cqt-item-title">Item</span>
+    <span class="cqt-item-obj">--</span>
+    <span class="cqt-item-caret" aria-hidden="true">▾</span>
+   </button>
   </div>
-  <div class="cqt-item-body">`;
+  <div class="cqt-item-body" id="cqt-item-body">`;
  for (const f of ITEM_FIELDS) {
   if (f.sec) html += `<div class="cqt-item-sec">${f.sec}</div>`;
   html += `<div class="cqt-item-row" data-k="${f.key}">
@@ -10604,11 +10666,15 @@ function itemCreate() {
  el.innerHTML = html;
  root.appendChild(el);
  item.el = el;
- if (getSettings().itemCollapsed) el.classList.add('collapsed');
-
- el.querySelector('.cqt-item-head').addEventListener('click', () => {
-  el.classList.toggle('collapsed');
-  lsSet(LS.settings, { ...getSettings(), itemCollapsed: el.classList.contains('collapsed') });
+ const collapsed = getSettings().itemCollapsed;
+ el.classList.toggle('collapsed', collapsed);
+ bindHudGrip(item, LS.itemPos);
+ const toggle = el.querySelector('.cqt-item-head');
+ toggle.setAttribute('aria-expanded', String(!collapsed));
+ toggle.addEventListener('click', () => {
+  const next = el.classList.toggle('collapsed');
+  toggle.setAttribute('aria-expanded', String(!next));
+  lsSet(LS.settings, { ...getSettings(), itemCollapsed: next });
   dockLayout();
  });
  el.querySelector('#cqt-item-get-lwh')?.addEventListener('click', guarded(() => fetchLWH(dock.id ?? resolveTargetId(), getFrame())));
@@ -10760,8 +10826,8 @@ const health = {
  cacheRev: -1,
  cacheAt: 0,
  data: null,
- drag: null,
- offset: null, // { dx, dy } so với góc trái trên của khung 3D CVAT
+ position: lsGet(LS.healthPos, null),
+ legacyOffset: lsGet(LS.legacyHealthPos, null),
 };
 
 function invalidateHealthCache() {
@@ -10781,27 +10847,12 @@ function healthLayout(onJob = !!getJob() && Number.isInteger(resolveTargetId()))
   return;
  }
  health.el.style.display = 'flex';
- if (!health.offset) {
-  health.offset = lsGet(LS.healthPos, { dx: 8, dy: 8 }) || { dx: 8, dy: 8 };
- }
- health.el.style.setProperty('--cqt-hud-width', `${Math.max(160, host.r.width - 16)}px`);
- const width = health.el.offsetWidth;
- const height = health.el.offsetHeight;
- const minX = Math.max(6, host.r.left + 8);
- const minY = Math.max(6, host.r.top + 8);
- const maxX = Math.max(minX, Math.min(window.innerWidth, host.r.right) - width - 8);
- const maxY = Math.max(minY, Math.min(window.innerHeight, host.r.bottom) - height - 8);
- let left = clamp(host.r.left + (health.offset.dx ?? 8), minX, maxX);
- let top = clamp(host.r.top + (health.offset.dy ?? 8), minY, maxY);
- const inspector = item.el?.getBoundingClientRect();
- if (inspector?.width && left < inspector.right + 8 && left + width > inspector.left - 8 &&
-     top < inspector.bottom + 8 && top + height > inspector.top - 8) {
-  const availableLeft = inspector.left - width - 8;
-  if (availableLeft >= minX) left = Math.min(left, availableLeft);
-  else if (inspector.bottom + 8 <= maxY) top = inspector.bottom + 8;
- }
- health.el.style.left = `${left}px`;
- health.el.style.top = `${top}px`;
+ const { left, top } = host.r;
+ placeFloatingHud(
+  health.el,
+  health.position?.x ?? left + (health.legacyOffset?.dx ?? 8),
+  health.position?.y ?? top + (health.legacyOffset?.dy ?? 8),
+ );
 }
 
 async function inspectObjectHealth(id, force = false) {
@@ -11152,7 +11203,7 @@ function healthCreate() {
  el.style.display = 'none';
  el.innerHTML = `
 <div class="cqt-hp-bar">
-<span class="cqt-hp-grip" title="Kéo để di chuyển thanh HUD trên màn hình CVAT">${ICONS.grip}</span>
+<button type="button" class="cqt-hud-grip cqt-hp-grip" aria-label="Di chuyển HUD trạng thái" title="Kéo HUD trạng thái hoặc dùng phím mũi tên">${ICONS.grip}</button>
 <span class="cqt-hp-obj" data-act="toggle-pop" title="Bấm để mở rộng / thu gọn bảng kiểm tra chi tiết">Chọn 1 object</span>
 <span class="cqt-hp-badges" data-act="toggle-pop"></span>
 <div class="cqt-hp-quick">
@@ -11217,23 +11268,7 @@ function healthCreate() {
  health.el = el;
  bindHealthPopEvents(el);
 
- // Kéo di chuyển thanh bằng grip
- const grip = el.querySelector('.cqt-hp-grip');
- grip.addEventListener('mousedown', (e) => {
-  if (e.button !== 0) return;
-  e.preventDefault();
-  e.stopPropagation();
-  const host = cvatViewRect('perspective');
-  const r = el.getBoundingClientRect();
-  health.drag = {
-   sx: e.clientX,
-   sy: e.clientY,
-   left0: r.left,
-   top0: r.top,
-   hostLeft: host ? host.r.left : 0,
-   hostTop: host ? host.r.top : 0,
-  };
- });
+ bindHudGrip(health, LS.healthPos);
 
  el.addEventListener('click', guarded(async (e) => {
   const target = e.target.closest('[data-act]');
@@ -11246,27 +11281,6 @@ function healthCreate() {
  }
  for (const type of ['click', 'contextmenu', 'pointerdown', 'mousedown', 'wheel']) {
   el.addEventListener(type, (e) => e.stopPropagation());
- }
-}
-
-function healthOnMouseMove(e) {
- const d = health.drag;
- if (!d || !health.el) return;
- health.offset = {
-  dx: d.left0 + e.clientX - d.sx - d.hostLeft,
-  dy: d.top0 + e.clientY - d.sy - d.hostTop,
- };
- healthLayout();
-}
-
-function healthOnMouseUp() {
- if (!health.drag) return;
- const { hostLeft, hostTop } = health.drag;
- health.drag = null;
- if (health.el) {
-  const rect = health.el.getBoundingClientRect();
-  health.offset = { dx: Math.round(rect.left - hostLeft), dy: Math.round(rect.top - hostTop) };
-  lsSet(LS.healthPos, health.offset);
  }
 }
 
@@ -11544,12 +11558,10 @@ function installDockHandlers() {
  listen(window, 'mousemove', (e) => {
   dockOnMouseMove(e);
   itemOnMouseMove(e);
-  healthOnMouseMove(e);
  });
  listen(window, 'mouseup', guarded(async () => {
   await dockOnMouseUp();
   await itemOnMouseUp();
-  healthOnMouseUp();
  }));
  listen(window, 'keydown', (e) => {
   if (e.key !== 'Escape') return;
@@ -11700,7 +11712,9 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 8px 9px; border-top: 1p
 .cqt-dock-empty { flex: 1; display: none; align-items: center; justify-content: center; text-align: center; padding: 8px; color: var(--cqt-text-dim); }
 /* Bảng Item kiểu Blender N-panel ở góc ô 3D */
 #cqt-item-panel { position: fixed; z-index: 950; width: 196px; display: none; flex-direction: column; background: var(--cqt-bg); color: var(--cqt-text); border: 1px solid var(--cqt-border); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif; font-size: 11px; }
-.cqt-item-head { display: flex; align-items: center; gap: 6px; padding: 4px 7px; cursor: pointer; user-select: none; background: var(--cqt-bg-bar); border-bottom: 1px solid var(--cqt-border-subtle); }
+.cqt-item-titlebar { display: flex; align-items: center; padding: 0 4px; flex: none; background: var(--cqt-bg-bar); border-bottom: 1px solid var(--cqt-border-subtle); }
+.cqt-item-head { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; padding: 4px 3px; border: 0; border-radius: 3px; color: inherit; background: none; cursor: pointer; font: inherit; user-select: none; }
+.cqt-item-head:hover { background: var(--cqt-bg-hover); }
 .cqt-item-title { font-weight: 700; }
 .cqt-item-obj { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cqt-text-muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
 #cqt-item-panel.collapsed .cqt-item-body { display: none; }
@@ -11731,8 +11745,9 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 8px 9px; border-top: 1p
 #cqt-tb-health { display: flex; flex-direction: column; border: 1px solid var(--cqt-border-subtle); border-radius: 5px; background: var(--cqt-bg-card); overflow: hidden; }
 #cqt-tb-health .cqt-hp-bar { height: auto; min-height: 24px; padding: 3px 5px; flex-wrap: wrap; gap: 3px; background: var(--cqt-bg-card); }
 #cqt-tb-health .cqt-hp-pop { max-height: 290px; padding: 6px; gap: 6px; }
-.cqt-hp-grip { cursor: move; color: var(--cqt-text-dim); display: inline-flex; align-items: center; padding: 1px; border-radius: 3px; flex: none; }
-.cqt-hp-grip:hover { color: var(--cqt-text); background: var(--cqt-bg-hover); }
+.cqt-hud-grip { cursor: grab; touch-action: none; color: var(--cqt-text-muted); background: none; border: 0; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 20px; padding: 0; border-radius: 3px; flex: none; }
+.cqt-hud-grip:hover, .cqt-hud-grip:focus-visible { color: var(--cqt-text); background: var(--cqt-bg-hover); }
+.cqt-hud-grip:active { cursor: grabbing; }
 .cqt-hp-obj { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; font: 600 10.5px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 4px; border-radius: 4px; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .cqt-hp-obj:hover { background: var(--cqt-bg-hover); }
 .cqt-hp-lbl { color: var(--cqt-text-sec); font-weight: 500; max-width: 76px; overflow: hidden; text-overflow: ellipsis; }

@@ -72,15 +72,20 @@
 }
 
 #cvat-cuboid-toolbox #cqt-health-pill {
-    max-width: min(var(--cqt-hud-width, 640px), calc(100vw - 24px));
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(640px, calc(100vw - 16px));
+    max-height: calc(100dvh - 16px);
 }
 
 #cvat-cuboid-toolbox #cqt-health-pill.open {
-    width: min(var(--cqt-hud-width, 640px), 640px);
+    width: min(640px, calc(100vw - 16px));
     min-width: 0;
 }
 
 #cvat-cuboid-toolbox #cqt-health-pill .cqt-hp-bar {
+    height: auto;
+    flex: none;
     flex-wrap: wrap;
     gap: 5px;
 }
@@ -92,7 +97,15 @@
 }
 
 #cvat-cuboid-toolbox #cqt-item-panel {
-    width: 180px;
+    box-sizing: border-box;
+    width: min(180px, calc(100vw - 16px));
+    max-height: calc(100dvh - 16px);
+}
+
+#cvat-cuboid-toolbox #cqt-item-panel .cqt-item-body {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 #cvat-cuboid-toolbox .cqt-disclosure {
