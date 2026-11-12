@@ -1,4 +1,4 @@
-// CVAT Cuboid Toolbox v4.7.0, adapted from the userscript by Antigravity.
+// CVAT Cuboid Toolbox, adapted from the userscript by Antigravity.
 function fitPlaneLSQ(pts) {
  const n = pts.length;
  if (n < 3) return null;
@@ -82,7 +82,7 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '4.7.0';
+const VERSION = '4.8.0';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
 const FIT_SIZE_HINT = 'Dùng cho Smart Snap. Bật để đo lại chiều dài, rộng và cao từ cụm điểm. Tắt để giữ kích thước hiện tại.';
@@ -787,7 +787,7 @@ function sleep(ms) {
 
 function annotationState() {
  const state = store.getState().annotation;
- return !scope.signal.aborted && state.job.instance === job ? state : null;
+ return !scope.signal.aborted && state?.job?.instance === job ? state : null;
 }
 
 function getJob() {
@@ -907,8 +907,7 @@ async function frameName(frame) {
 // =========================================================================
 async function refreshViaStore() {
  if (!getJob()) return false;
- await refreshAnnotations();
- return !!getJob();
+ return await refreshAnnotations() !== false && !!getJob();
 }
 
 async function waitForFrame(target, timeoutMs) {
@@ -966,7 +965,8 @@ async function jumpTo(id, frame) {
 // =========================================================================
 function getCanvas3dViews() {
  if (disposing) return lastViews;
- const views = annotationState()?.canvas?.instance?.getToolboxViews?.() || null;
+ const canvas = annotationState()?.canvas?.instance;
+ const views = canvas?.getToolboxViews?.() ?? canvas?.view?.views ?? null;
  if (views) lastViews = views;
  return views;
 }
@@ -6918,7 +6918,7 @@ function runGroundFitShortcut(kind) {
 
 let shortcutUntil = 0;
 function hasNativePrefix(shortcut = 'alt+q+shift') {
- return Object.values(store.getState().shortcuts.keyMap).some(({ sequences = [] }) =>
+ return Object.values(store.getState().shortcuts?.keyMap ?? {}).some(({ sequences = [] }) =>
   sequences.some((sequence) => typeof sequence === 'string' &&
    sequence.toLowerCase().trim().split(/\s+/)[0].split('+')
     .map((part) => part === 'option' ? 'alt' : part).sort().join('+') === shortcut));
@@ -7621,6 +7621,10 @@ function fcLayout() {
  return fc.layout || (fc.allRows.length === 1 ? 'focus' : 'table');
 }
 
+function fcShows3D() {
+ return fcLayout() === 'stacked' || fc.cfg.show3d;
+}
+
 async function fcStepFocus(direction) {
  const idx = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
  const next = fc.filteredRows[idx + direction];
@@ -8017,10 +8021,10 @@ function fcViewGeom(canvas, view, row = null) {
  const ew = view === 'side' ? l + 2 * m : w + 2 * m;
  const eh = view === 'top' ? l + 2 * m : h + 2 * m;
  const viewport = row?.view2d?.[view];
- const focused = row && !canvas._extent && fcLayout() === 'focus';
+ const fitBox = row && !canvas._extent && fcLayout() !== 'table';
  const boxW = Math.abs(row?.base[view === 'side' ? 6 : 7] || 0);
  const boxH = Math.abs(row?.base[view === 'top' ? 6 : 8] || 0);
- const fit = focused
+ const fit = fitBox
   ? Math.min(Math.max(1, Math.min(cw - 32, cw * 0.8)) / Math.max(0.3, boxW),
    Math.max(1, Math.min(ch - 40, ch * 0.8)) / Math.max(0.3, boxH))
   : Math.min(cw / ew, ch / eh);
@@ -8543,7 +8547,7 @@ const projectionPaths = new WeakMap();
 
 function fcRenderView(row, canvas) {
  const view = canvas.dataset.view;
- if (view === '3d' && !fc.cfg.show3d) return;
+ if (view === '3d' && !fcShows3D()) return;
  const g = fcViewGeom(canvas, view, row);
  if (g.cw < 4 || g.ch < 4) return;
  const dpr = window.devicePixelRatio || 1;
@@ -8881,7 +8885,7 @@ function fcRenderList() {
 function fcOnIntersect(entries) {
  for (const en of entries) {
   const row = fcRowByFrame(Number(en.target.dataset.frame));
-  if (!row) continue;
+  if (!row || row.el !== en.target) continue;
   row.visible = en.isIntersecting;
   if (row.visible) {
    fcSchedule([row]);
@@ -8993,6 +8997,7 @@ function fcUpdateBars() {
  fc.el.querySelectorAll('[data-fc-filter]').forEach((b) => b.classList.toggle('active', b.dataset.fcFilter === fc.cfg.filter));
  const layout = fcLayout();
  fc.el.classList.toggle('focus-layout', layout === 'focus');
+ fc.el.classList.toggle('stacked-layout', layout === 'stacked');
  for (const button of fc.el.querySelectorAll('[data-fc-layout]')) {
   const active = button.dataset.fcLayout === layout;
   button.classList.toggle('active', active);
@@ -9030,13 +9035,18 @@ function fcUpdateBars() {
  }
  const sel = $('cqt-fc-selcount');
  if (sel) sel.textContent = String(fc.selected.size);
+ const show3d = fcShows3D();
  const btn3d = $('cqt-fc-toggle-3d');
- if (btn3d) btn3d.classList.toggle('active', !!fc.cfg.show3d);
+ if (btn3d) {
+  btn3d.classList.toggle('active', show3d);
+  btn3d.disabled = layout === 'stacked';
+  btn3d.setAttribute('aria-pressed', String(show3d));
+ }
  const btnScene3d = $('cqt-fc-scene3d');
  if (btnScene3d) btnScene3d.classList.toggle('active', !!(fc.cfg.scene3d || fc.cfg.slice === 'scene'));
  const fullDetail = $('cqt-fc-full-detail');
  if (fullDetail) {
-  fullDetail.disabled = !(fc.cfg.show3d && (fc.cfg.scene3d || fc.cfg.slice === 'scene'));
+  fullDetail.disabled = !(show3d && (fc.cfg.scene3d || fc.cfg.slice === 'scene'));
   fullDetail.setAttribute('aria-pressed', String(fc.cfg.fullSceneDetail));
   fullDetail.classList.toggle('active', fc.cfg.fullSceneDetail);
  }
@@ -9050,7 +9060,7 @@ function fcUpdateBars() {
    b.classList.toggle('active', b.dataset.splitMode === curMode);
   });
  }
- fc.el.classList.toggle('hide-3d', !fc.cfg.show3d);
+ fc.el.classList.toggle('hide-3d', !show3d);
  fc.el.classList.toggle('live3d-split', !!fc.cfg.live3d);
  fc.el.classList.toggle('live3d-right', !!(fc.cfg.live3d && fc.cfg.liveSplitMode === 'right'));
  syncSafeDataUI();
@@ -9726,6 +9736,7 @@ const FC_HTML = `
   <div class="cqt-fc-seg" aria-label="Bố cục Full Control">
    <button type="button" data-fc-layout="table" aria-pressed="true">Bảng track</button>
    <button type="button" data-fc-layout="focus" aria-pressed="false">Frame lớn</button>
+   <button type="button" data-fc-layout="stacked" aria-pressed="false" title="3D lớn trên Top, Side, Front cho mỗi frame. Cuộn để xem các frame nối tiếp.">3D lớn</button>
   </div>
   <div class="cqt-fc-focus-nav">
    <button id="cqt-fc-focus-prev" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame trước">‹</button>
@@ -9978,9 +9989,17 @@ function fcBindWindow(el) {
  on('cqt-fc-focus-prev', () => fcStepFocus(-1));
  on('cqt-fc-focus-next', () => fcStepFocus(1));
  el.querySelectorAll('[data-fc-layout]').forEach((button) => button.addEventListener('click', () => {
-  fc.layout = button.dataset.fcLayout;
-  if (fc.layout === 'focus' && Number.isInteger(fc.lastClicked)) fc.focusFrame = fc.lastClicked;
+  const current = fcLayout();
+  const next = button.dataset.fcLayout;
+  if (next === current) return;
+  const listTop = list.getBoundingClientRect().top;
+  const firstVisible = fc.rows.find((row) => row.el?.getBoundingClientRect().bottom > listTop);
+  fc.layout = next;
+  if (next === 'focus') fc.focusFrame = fc.lastClicked ?? firstVisible?.frame ?? fc.focusFrame;
   fcRenderList();
+  if (next !== 'focus' && firstVisible?.el) {
+   list.scrollTop += firstVisible.el.getBoundingClientRect().top - listTop;
+  }
  }));
  on('cqt-fc-max', fcToggleMaximize);
  on('cqt-fc-undo', async () => { await restoreLatestSnapshot(); });

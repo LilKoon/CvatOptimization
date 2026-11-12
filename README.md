@@ -4,6 +4,8 @@ Cuboid Toolbox được tích hợp vào giao diện CVAT Community **v2.76.0** 
 
 Trong **Full Control**, mở **Limit theo class** để chỉnh ngưỡng L/W/H, kiểm tra và gọt theo class. Nút **Công cụ Toolbox** mở các tab Box, Ground, Track, QA và Cài đặt ngay cạnh bảng. Chế độ **Đầy đủ điểm** giữ point cloud của frame đã nạp khi xoay, kéo nền hoặc di chuyển cuboid. Trong **Frame lớn**, lăn chuột để zoom từng góc chiếu, kéo nền để dịch và bấm nút tâm để căn lại.
 
+Chọn **3D lớn** để cuộn qua các frame nối tiếp. Mỗi frame có khung 3D toàn chiều ngang và ba góc Top, Side, Front ngay bên dưới. Giữ `Option`, `Alt` hoặc `Ctrl` khi lăn để zoom góc chiếu. Lăn thường để cuộn danh sách frame.
+
 ## Build giao diện Toolbox
 
 Cần Git, Docker Engine hoặc Docker Desktop, và Docker Compose v2. Chạy các lệnh này trên máy chạy CVAT để Docker build image phù hợp với kiến trúc của máy.
