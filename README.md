@@ -6,7 +6,7 @@ Trong **Full Control**, mở **Limit theo class** để chỉnh ngưỡng L/W/H,
 
 Chọn **3D lớn** để cuộn qua các frame nối tiếp. Mỗi frame có khung 3D toàn chiều ngang và ba góc Top, Side, Front ngay bên dưới. Giữ `Option`, `Alt` hoặc `Ctrl` khi lăn để zoom góc chiếu. Lăn thường để cuộn danh sách frame.
 
-Trong **3D lớn**, khung nhìn tự thu gọn theo chiều cao còn lại khi mở các bảng điều khiển. Ô **Object ID** nhận số nguyên từ 1 trở lên.
+Trong **3D lớn**, nếu chỉ hiển thị một frame, các khung nhìn lấp đầy chiều cao còn lại. Khi hiển thị nhiều frame, mỗi hàng giữ kích thước gọn để cuộn qua track. Ô **Object ID** nhận số nguyên từ 1 trở lên.
 
 ## Build giao diện Toolbox
 

@@ -376,6 +376,13 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
     border-bottom: 3px solid var(--cqt-border);
 }
 
+#cvat-cuboid-toolbox .stacked-layout .cqt-fc-row:only-child {
+    box-sizing: border-box;
+    height: 100%;
+    min-height: min-content;
+    grid-template-rows: auto minmax(112px, 3fr) minmax(92px, 2fr) auto;
+}
+
 #cvat-cuboid-toolbox .stacked-layout [data-view-cell="3d"] {
     grid-area: perspective;
     border-bottom: 1px solid var(--cqt-border);
