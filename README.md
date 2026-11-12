@@ -1,3 +1,52 @@
+# CvatOptimization · Cuboid Toolbox
+
+Cuboid Toolbox được tích hợp vào giao diện CVAT Community **v2.76.0** cho job 3D LiDAR. Tool có Full Control, QA/QC, Fit Ground theo point cloud, gốc LiDAR hoặc Anchor và hai HUD có thể kéo độc lập.
+
+## Build giao diện Toolbox
+
+Cần Git, Docker Engine hoặc Docker Desktop, và Docker Compose v2. Chạy các lệnh này trên máy chạy CVAT để Docker build image phù hợp với kiến trúc của máy.
+
+```sh
+git clone https://github.com/LilKoon/CvatOptimization.git
+cd CvatOptimization
+docker build -f Dockerfile.ui -t cvatoptimization/ui:v2.76.0-toolbox .
+```
+
+### Gắn vào CVAT đang chạy
+
+Các bước dưới đây dành cho một stack Docker Compose đang chạy **CVAT Community v2.76.0**. Lưu đường dẫn đến file override, rồi chuyển sang thư mục Compose của stack hiện tại.
+
+```sh
+toolbox_compose="$PWD/docker-compose.toolbox.yml"
+cd /duong-dan/toi/cvat-dang-chay
+docker compose -f docker-compose.yml -f "$toolbox_compose" up -d --no-deps cvat_ui
+```
+
+Nếu stack hiện tại có `-p`, `--env-file`, hoặc các file `-f` riêng như HTTPS, dùng lại các tuỳ chọn đó và thêm `-f "$toolbox_compose"` sau các file Compose hiện có. Override chỉ đổi image của `cvat_ui`. Các container backend và volume dữ liệu tiếp tục phục vụ stack hiện tại.
+
+Để quay về giao diện cũ, chạy `docker compose -f docker-compose.yml up -d --no-deps cvat_ui` với các tuỳ chọn Compose gốc của stack.
+
+### Cài CVAT mới cùng Toolbox
+
+Từ thư mục `CvatOptimization` sau khi build image, chạy:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.toolbox.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.toolbox.yml exec cvat_server python3 manage.py createsuperuser
+```
+
+Docker dùng các image backend v2.76.0 trong Compose. Xem thêm [hướng dẫn cài CVAT](https://docs.cvat.ai/docs/administration/community/basics/installation/) và [cách kết hợp file Compose](https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/).
+
+### Mở Toolbox
+
+1. Mở [CVAT trên localhost](http://localhost:8080) hoặc địa chỉ CVAT của stack đang dùng.
+2. Vào một job 3D và bấm **Cuboid Toolbox** cạnh thanh frame. Nếu Tampermonkey đang bật bản userscript cũ cho cùng địa chỉ, hãy tắt bản đó để tránh nhận phím hai lần.
+3. Dùng tay nắm sáu chấm để đặt HUD trạng thái và bảng Item XYZ/LWH. HUD trạng thái có thể phủ lên Item và các nút bố cục 3D khi mở rộng.
+
+`Option/Alt+Q` mở Toolbox, `Option/Alt+T` mở Full Control và `Option/Alt+W` mở QA/QC. Bảng phím tắt nằm trong **Cài đặt → Phím tắt Toolbox**.
+
+---
+
 [![CVAT Community header](site/content/en/images/cvat_github_header.webp)](https://app.cvat.ai)
 # CVAT: Computer Vision Annotation Tool
 

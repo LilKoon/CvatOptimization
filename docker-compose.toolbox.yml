@@ -1,0 +1,4 @@
+services:
+  cvat_ui:
+    image: cvatoptimization/ui:v2.76.0-toolbox
+    pull_policy: never
