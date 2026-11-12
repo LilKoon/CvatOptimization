@@ -41,16 +41,23 @@
     display: flex;
 }
 
-#cvat-cuboid-toolbox #cqt-sidebar-rail {
-    padding: 5px 9px;
-    font: inherit;
-    font-weight: 600;
+#cvat-cuboid-toolbox #cqt-sidebar-rail:not([hidden]) {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
     color: var(--cqt-text);
     background: var(--cqt-bg-elev);
     border: 1px solid var(--cqt-border-btn);
     border-radius: 6px;
     cursor: pointer;
     pointer-events: auto;
+}
+
+#cvat-cuboid-toolbox #cqt-sidebar-rail .cqt-svg {
+    width: 16px;
+    height: 16px;
 }
 
 #cvat-cuboid-toolbox #cvat-quicktool-header {

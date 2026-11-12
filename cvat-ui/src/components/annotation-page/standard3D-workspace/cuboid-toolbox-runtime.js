@@ -99,6 +99,7 @@ const escapeHtml = (s) =>
 const svgIcon = (paths, size = 12) =>
  `<svg class="cqt-svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
 const ICONS = {
+ cuboid: svgIcon('<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>', 13),
  shield: svgIcon('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/>'),
  zap: svgIcon('<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>'),
  globe: svgIcon('<circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>'),
@@ -12113,12 +12114,12 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 6px 9px 8px; display: f
 
 const PANEL_HTML = `
 <button type="button" id="cvat-quicktool-handle" aria-expanded="false" aria-controls="cvat-quicktool-panel" title="Mở hoặc thu gọn Toolbox (${OPTION_KEY}Q)">Cuboid Toolbox</button>
-<button type="button" id="cqt-sidebar-rail" aria-controls="cvat-quicktool-panel" aria-expanded="false" hidden>Cuboid Toolbox</button>
+<button type="button" id="cqt-sidebar-rail" aria-label="Mở lại Cuboid Toolbox" title="Mở lại Cuboid Toolbox" aria-controls="cvat-quicktool-panel" aria-expanded="false" hidden>${ICONS.cuboid}</button>
 <section id="cvat-quicktool-panel" aria-label="Cuboid Toolbox" inert>
 <div id="cvat-quicktool-header">
 <div class="title">
 <button type="button" class="cqt-hud-grip cqt-toolbox-grip" aria-label="Di chuyển Toolbox" title="Kéo để di chuyển Toolbox · Nhấp đúp để về mép trái">${ICONS.grip}</button>
-<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+${ICONS.cuboid}
 <span>Cuboid Toolbox</span>
 </div>
 <div class="actions">
