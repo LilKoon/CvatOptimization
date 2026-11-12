@@ -11079,11 +11079,11 @@ async function inspectObjectHealth(id, force = false) {
 
  const anchorIds = getExplicitAnchorIds();
  const missingAnchorFrames = [];
- if (anchorIds.length > 0) {
+ // Fit Ground protects cuboids listed as anchors, so those targets do not need coverage.
+ if (anchorIds.length > 0 && !anchorIds.includes(id)) {
   for (const x of visFrames) {
    let hasAnchor = false;
    for (const aid of anchorIds) {
-    if (aid === id) continue; // target không tự làm anchor cho chính mình
     const as = await getState(aid, x.frame);
     if (as && isCuboid(as) && !as.outside) {
      hasAnchor = true;
@@ -11383,14 +11383,17 @@ function renderHealthAnchor(rootEl, data) {
  if (!ids.length) return;
 
  const missing = data.missingAnchorFrames;
- const label = missing.length ? `Thiếu Anchor · ${missing.length} frame` : `Anchor · ${ids.length} mốc`;
+ const targetIsAnchor = ids.includes(data.id);
+ let label = `Anchor · ${ids.length} mốc`;
+ if (targetIsAnchor) label = `#${data.id} là Anchor`;
+ else if (missing.length) label = `Thiếu Anchor · ${missing.length} frame`;
  const compactLabel = row.querySelector('[data-role="anchor-label"]');
  if (compactLabel.textContent !== label) compactLabel.textContent = label;
  if (!rootEl.classList.contains('open')) return;
 
  const detailLabel = details.querySelector('[data-role="anchor-label"]');
  if (detailLabel.textContent !== label) detailLabel.textContent = label;
- const key = `${ids.join(',')}/${missing.map(({ frame }) => frame).join(',')}`;
+ const key = `${data.id}/${ids.join(',')}/${missing.map(({ frame }) => frame).join(',')}`;
  if (details.dataset.contentKey === key) return;
  details.dataset.contentKey = key;
  const jumps = formatFrameRanges(missing.map(({ frame }) => frame)).map(({ from, text }) =>
@@ -11398,6 +11401,7 @@ function renderHealthAnchor(rootEl, data) {
  details.querySelector('.cqt-hp-anchor-content').innerHTML = `
   <div class="cqt-label">Anchor theo thứ tự ưu tiên</div>
   <div class="cqt-hp-anchor-list">${ids.map((id) => `<span class="cqt-badge">#${id}</span>`).join('')}</div>
+  ${targetIsAnchor ? `<div class="cqt-hint">Để fit #${data.id}, gỡ nó khỏi danh sách Anchor rồi chọn mốc khác.</div>` : ''}
   ${jumps ? `<div class="cqt-label">Frame thiếu Anchor</div><div class="cqt-hp-anchor-list">${jumps}</div>` : ''}
  `;
 }
