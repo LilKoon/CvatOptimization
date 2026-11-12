@@ -6312,12 +6312,19 @@ async function applyFixes(title, ops) {
   if (err) return fail(`${sorted[i].title}: ${err}`);
  }
  const batch = createBatch(title);
- for (let i = 0; i < sorted.length; i++) {
-  setStatus(`⏳ Đang sửa ${i + 1}/${sorted.length}: ${sorted[i].title}`);
-  await sorted[i].apply(batch, paramValues(sorted[i]));
+ let failure;
+ try {
+  for (let i = 0; i < sorted.length; i++) {
+   setStatus(`⏳ Đang sửa ${i + 1}/${sorted.length}: ${sorted[i].title}`);
+   await sorted[i].apply(batch, paramValues(sorted[i]));
+  }
+ } catch (error) {
+  failure = error;
  }
  const res = await batch.finish();
+ if (res.changed && fc.open && !fc.toolsOpen) await fcReloadStates();
  if (lastQA && ops.some((o) => o.type !== 'seq')) await scanQA();
+ if (failure) return fail(`Dừng sửa sau ${res.changed} lần cập nhật: ${failure.message || failure}`);
  setStatus(
   `⚡ Đã áp dụng ${ops.length} đề xuất (${res.changed} lần sửa). Có snapshot để khôi phục.` + editSuffix(res),
   res.errors ? 'warn' : 'success'
