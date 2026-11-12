@@ -254,7 +254,6 @@ function PlayerNavigation(props: Props): JSX.Element {
                     </Col>
                 </Row>
             </Col>
-            {workspace === Workspace.STANDARD3D && <Col id='cvat-cuboid-toolbar' />}
             <Col>
                 <CVATTooltip title={`Press ${focusFrameInputShortcut} to focus here`}>
                     <InputNumber
@@ -293,6 +292,7 @@ function PlayerNavigation(props: Props): JSX.Element {
                     )
                 }
             </Col>
+            {workspace === Workspace.STANDARD3D && <Col id='cvat-cuboid-toolbar' />}
         </>
     );
 }
