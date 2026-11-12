@@ -68,6 +68,9 @@ export default function mountCuboidToolbox({
  const root = document.createElement('div');
  root.id = 'cvat-cuboid-toolbox';
  document.body.appendChild(root);
+ const toolbar = document.getElementById('cvat-cuboid-toolbar');
+ let launcher;
+ let projectionButton;
  let lastViews = null;
  let disposing = false;
 
@@ -172,7 +175,7 @@ const DEFAULT_SETTINGS = {
  // localStorage. Mọi sửa đổi chỉ nằm trong bộ nhớ trang cho tới khi bấm Ctrl+S (lưu của chính CVAT).
  safeData: true,
  theme: 'dark', // 'dark' | 'light'
- dockViews: true, // đè TOP / SIDE / FRONT kiểu Full Control lên 3 ô nhìn phụ của CVAT
+ dockViews: false, // đè TOP / SIDE / FRONT kiểu Full Control lên 3 ô nhìn phụ của CVAT
  itemPanel: true, // bảng Item (Location / Rotation / Dimensions) ở góc ô 3D
  itemCollapsed: true,
  blenderKeys: true, // G/W/S sau tiền tố, trên canvas 3D
@@ -1025,6 +1028,7 @@ function findDrawnMesh(id) {
 // Ô nhập, trạng thái, log
 // =========================================================================
 function $(id) {
+ if (id === 'cvat-quicktool-handle' && launcher) return launcher;
  return root.querySelector(`#${CSS.escape(id)}`);
 }
 
@@ -1151,6 +1155,7 @@ function setSafeData(on, opts = {}) {
   if (fc.harvesting) fc.abort = true;
  }
  syncSafeDataUI();
+ renderQC();
  if (!opts.silent) {
   setStatus(
    next
@@ -1322,6 +1327,7 @@ async function applySnapshotItems(items) {
   }
  }
  const ok = await refreshView();
+ invalidateQC();
  invalidateHealthCache();
  if (fc.open) await fcReloadStates();
  await dockTick(true);
@@ -1463,6 +1469,8 @@ function createBatch(label) {
    try {
     pushSnapshot(label, items);
     const restored = changed && refresh ? await refreshView() : true;
+    if (changed && fc.toolsOpen && !fc.busy) await fcReloadStates();
+    if (changed) invalidateQC();
     return { changed, errors, restored };
    } finally {
     endBusy(busy);
@@ -4957,6 +4965,14 @@ const QA_TYPES = {
 };
 
 let lastQA = null; // { rows, data, opts, range }
+let qaInFlight = null;
+let qcDirty = false;
+let qcNotice = '';
+let qcPage = 0;
+let qcOptionsLocation;
+let qcFocus;
+const qcReview = new Map();
+const QC_PAGE_SIZE = 25;
 
 // Badge "x/9 bật" trên đầu bảng tiêu chí QA (thu gọn được)
 function updateQAActiveCount(o = getQAOptions()) {
@@ -5030,7 +5046,9 @@ function qaRange(opts) {
  if (!b) return fail('Chưa kết nối CVAT Job!');
  if (opts.wholeJob) return { from: b.start, to: b.stop };
  const from = intVal('cqt-frame-start'), to = intVal('cqt-frame-end');
- if (!Number.isInteger(from) || !Number.isInteger(to) || from > to) return fail('Dải frame không hợp lệ (Start <= End)!');
+ if (!Number.isInteger(from) || !Number.isInteger(to) || from > to || from < b.start || to > b.stop) {
+  return fail(`Dải QA phải nằm trong F${b.start}–F${b.stop}.`);
+ }
  return { from, to };
 }
 
@@ -5078,12 +5096,14 @@ function overlapRule(cls1, cls2, opts) {
  return { maxIoU: 0, text: 'Không cho phép chồng lấn' };
 }
 
-function runQAChecks(data, opts) {
+async function runQAChecks(data, opts) {
  const rows = [];
  const row = (frame, rec, type, desc, value, threshold, related = '') =>
   rows.push({ frame, itemId: '', trackId: rec.id, cls: rec.label, type, desc, value, threshold, related });
 
+ let lastYield = performance.now();
  for (const rec of data.tracks.values()) {
+  if (performance.now() - lastYield > 20) { await sleep(0); lastYield = performance.now(); }
   // Thiếu track_id: shape không có thuộc tính track_id, hoặc thuộc tính track_id để trống
   if (opts.missingTrack) {
    for (const x of rec.frames) {
@@ -5157,6 +5177,7 @@ function runQAChecks(data, opts) {
  if (opts.overlap) {
   for (const [f, list] of data.frames) {
    for (let i = 0; i < list.length; i++) {
+    if (performance.now() - lastYield > 20) { await sleep(0); lastYield = performance.now(); }
     for (let j = i + 1; j < list.length; j++) {
      const A = list[i], B = list[j];
      const ov = bevOverlap(A.points, B.points);
@@ -5287,14 +5308,41 @@ async function scanGroundRows(data, opts) {
  return { rows, stats: { checked, noCloud, noGround, frames: frames.length } };
 }
 
-async function scanQA() {
+function qaHistoryStamp() {
+ const history = annotationState()?.annotations.history;
+ return history ? JSON.stringify([history.undo, history.redo]) : '';
+}
+
+function invalidateQC() {
+ if (!lastQA) return;
+ qcDirty = true;
+ renderQC();
+}
+
+function scanQA() {
+ if (qaInFlight) return qaInFlight;
+ qcNotice = '';
+ qaInFlight = scanQAImpl().then((result) => {
+  if (!result) qcNotice = $('cqt-status')?.textContent || 'Không quét được dải đã chọn.';
+  return result;
+ }, (error) => {
+  qcNotice = error?.message || 'Không quét được QA.';
+  throw error;
+ }).finally(() => {
+  qaInFlight = null;
+  renderQC();
+ });
+ renderQC();
+ return qaInFlight;
+}
+
+async function scanQAImpl() {
  const opts = readQAOptionsFromUI();
  const range = qaRange(opts);
  if (!range) return null;
  setStatus('⏳ Đang quét QA...');
  const data = await scanJobData(range.from, range.to);
- if (!data.tracks.size) return fail('Không có cuboid nào trong dải.');
- const rows = runQAChecks(data, opts);
+ const rows = await runQAChecks(data, opts);
  let groundNote = '';
  if (opts.ground && safeData()) {
   groundNote = ' Bỏ qua mục "Chưa chạm đất" (cần đọc cloud từng frame) vì đang bật Chế độ an toàn dữ liệu.';
@@ -5309,12 +5357,15 @@ async function scanQA() {
   groundNote += ' Lưu ý: cloud có vẻ theo toạ độ thế giới — mục "Quá xa" đang tính từ gốc toạ độ, không phải từ xe LiDAR.';
  }
  await fillItemIds(rows);
- lastQA = { rows, data, opts, range };
+ if (!getJob()) return null;
+ lastQA = { rows, data, opts, range, groundNote, history: qaHistoryStamp() };
+ qcDirty = false;
+ qcPage = 0;
  renderQAResult();
  const tracks = new Set(rows.map((r) => r.trackId)).size;
  setStatus(
   `🔎 QA ${range.from}–${range.to}: ${data.tracks.size} object, ${rows.length} lỗi ở ${tracks} object.` + groundNote,
-  rows.length ? 'warn' : 'success'
+  rows.length || !data.tracks.size ? 'warn' : 'success'
  );
  return lastQA;
 }
@@ -5341,7 +5392,7 @@ function renderQAResult() {
   box.textContent = 'Không phát hiện lỗi.';
   return;
  }
- const LIMIT = 400;
+ const LIMIT = 8;
  shown.slice(0, LIMIT).forEach((r) => {
   const div = document.createElement('div');
   div.className = 'cqt-qa-row';
@@ -5356,9 +5407,173 @@ function renderQAResult() {
  });
  if (shown.length > LIMIT) {
   const more = document.createElement('div');
-  more.textContent = `... +${shown.length - LIMIT} dòng (xem đầy đủ trong CSV)`;
+  more.textContent = `Còn ${shown.length - LIMIT} kết quả. Mở QA/QC để xem đầy đủ.`;
   box.appendChild(more);
  }
+}
+
+function qcIssueKey(issue) {
+ return JSON.stringify([issue.frame, issue.trackId, issue.type, issue.related || '', issue.desc]);
+}
+
+function qcReviewState(issue) {
+ return qcReview.get(qcIssueKey(issue)) || 'pending';
+}
+
+function qcFilteredRows() {
+ const type = val('cqt-qc-type') || '';
+ const status = val('cqt-qc-review') || '';
+ const query = (val('cqt-qc-search') || '').trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+ return (lastQA?.rows || []).filter((issue) => {
+  if ((type && issue.type !== type) || (status && qcReviewState(issue) !== status)) return false;
+  const text = `F${issue.frame} #${issue.trackId} ${issue.itemId} ${issue.cls} ${issue.type} ${issue.desc}`.toLocaleLowerCase();
+  return query.every((term) => text.includes(term));
+ });
+}
+
+function renderQC() {
+ const box = $('cqt-qc-workspace');
+ if (!box) return;
+ const issues = lastQA?.rows || [];
+ const filter = $('cqt-qc-type');
+ const previous = filter.value;
+ const counts = new Map();
+ const reviewCounts = { pending: 0, reviewed: 0, deferred: 0 };
+ for (const issue of issues) {
+  counts.set(issue.type, (counts.get(issue.type) || 0) + 1);
+  reviewCounts[qcReviewState(issue)]++;
+ }
+ filter.replaceChildren(new Option('Mọi loại lỗi', ''));
+ for (const [type, count] of counts) filter.add(new Option(`${type} (${count})`, type));
+ if (counts.has(previous)) filter.value = previous;
+ const matches = qcFilteredRows();
+ const totalPages = Math.max(1, Math.ceil(matches.length / QC_PAGE_SIZE));
+ qcPage = clamp(qcPage, 0, totalPages - 1);
+ $('cqt-qc-summary').textContent = lastQA
+  ? `F${lastQA.range.from}–F${lastQA.range.to} · ${lastQA.data.tracks.size} object · ${issues.length} lỗi` : 'Chưa quét job';
+ $('cqt-qc-totals').textContent = `${reviewCounts.pending} chưa duyệt · ${reviewCounts.reviewed} đã duyệt · ${reviewCounts.deferred} để sau`;
+ $('cqt-qc-status').textContent = qaInFlight ? 'Đang quét annotation…' :
+  qcNotice || (qcDirty ? 'Annotation hoặc tiêu chí đã thay đổi. Quét lại trước khi áp sửa.' :
+   (lastQA?.groundNote || (lastQA && !lastQA.data.tracks.size ? 'Dải đã quét chưa có cuboid.' : '')));
+ $('cqt-qc-prev').disabled = qcPage === 0;
+ $('cqt-qc-next').disabled = qcPage === totalPages - 1;
+ $('cqt-qc-page').textContent = `${matches.length} kết quả · ${qcPage + 1}/${totalPages}`;
+ $('cqt-qc-scan').disabled = !!qaInFlight;
+ $('cqt-qc-preview').disabled = !!qaInFlight || !matches.length;
+ $('cqt-qc-export').disabled = safeData() || !issues.length || !!qaInFlight;
+ $('cqt-qc-export').title = safeData() ? 'Chế độ an toàn dữ liệu đang bật' : 'Xuất tất cả kết quả của lần quét';
+ const body = $('cqt-qc-rows');
+ body.replaceChildren();
+ $('cqt-qc-empty').hidden = matches.length !== 0;
+ $('cqt-qc-empty').textContent = lastQA ? 'Không có kết quả trong bộ lọc này.' : 'Bấm Quét QA để bắt đầu.';
+ const selected = matches.slice(qcPage * QC_PAGE_SIZE, (qcPage + 1) * QC_PAGE_SIZE);
+ selected.forEach((issue) => {
+  const row = body.insertRow();
+  const jump = document.createElement('button');
+  jump.type = 'button';
+  jump.className = 'cqt-btn cqt-btn-secondary cqt-sm';
+  jump.textContent = `F${issue.frame} · #${issue.trackId}`;
+  jump.title = 'Mở frame và chọn cuboid';
+  jump.addEventListener('click', guarded(async () => {
+   if (!(await goToFrame(issue.frame))) {
+    $('cqt-qc-status').textContent = `Không mở được frame ${issue.frame}.`;
+    return;
+   }
+   if (fc.open) closeFullControl();
+   closeQCWorkspace(false);
+   await jumpTo(issue.trackId, issue.frame);
+  }));
+  row.insertCell().appendChild(jump);
+  row.insertCell().textContent = issue.cls;
+  row.insertCell().textContent = issue.type;
+  const detail = row.insertCell();
+  detail.textContent = issue.desc;
+  const metrics = [issue.value, issue.threshold, issue.related].filter((value) => value !== '' && value != null);
+  if (metrics.length) {
+   const small = document.createElement('small');
+   small.textContent = metrics.join(' · ');
+   detail.appendChild(small);
+  }
+  const review = document.createElement('select');
+  review.className = 'cqt-input';
+  review.setAttribute('aria-label', `Trạng thái duyệt lỗi F${issue.frame}, object ${issue.trackId}`);
+  review.add(new Option('Chưa duyệt', 'pending'));
+  review.add(new Option('Đã duyệt', 'reviewed'));
+  review.add(new Option('Để sau', 'deferred'));
+  review.value = qcReviewState(issue);
+  review.addEventListener('change', () => {
+   qcReview.set(qcIssueKey(issue), review.value);
+   renderQC();
+   const replacement = [...body.querySelectorAll('select')].find((el) => el.getAttribute('aria-label') === review.getAttribute('aria-label'));
+   (replacement || $('cqt-qc-review')).focus({ preventScroll: true });
+  });
+  row.insertCell().appendChild(review);
+ });
+}
+
+function closeQCWorkspace(restoreFocus = true) {
+ const box = $('cqt-qc-workspace');
+ if (!box) return;
+ const options = $('cqt-qa-details');
+ qcOptionsLocation.parent.insertBefore(options, qcOptionsLocation.next);
+ box.remove();
+ if (restoreFocus && qcFocus?.isConnected) qcFocus.focus({ preventScroll: true });
+}
+
+function openQCWorkspace() {
+ if ($('cqt-qc-workspace')) return;
+ qcFocus = document.activeElement;
+ qcPage = 0;
+ const options = $('cqt-qa-details');
+ qcOptionsLocation = { parent: options.parentNode, next: options.nextSibling };
+ const box = document.createElement('section');
+ box.id = 'cqt-qc-workspace';
+ box.setAttribute('role', 'dialog');
+ box.setAttribute('aria-labelledby', 'cqt-qc-title');
+ box.innerHTML = `
+  <header class="cqt-qc-head">
+   <div><h2 id="cqt-qc-title">QA/QC cuboid</h2><span id="cqt-qc-summary"></span></div>
+   <button id="cqt-qc-close" class="cqt-btn cqt-btn-secondary" aria-label="Đóng QA/QC">Đóng</button>
+  </header>
+  <div class="cqt-qc-toolbar">
+   <button id="cqt-qc-scan" class="cqt-btn cqt-btn-primary">Quét QA</button>
+   <button id="cqt-qc-preview" class="cqt-btn cqt-btn-secondary" title="Xem trước đề xuất cho lỗi đang lọc. Một số đề xuất áp trên cả track.">Xem trước sửa</button>
+   <button id="cqt-qc-export" class="cqt-btn cqt-btn-secondary">Xuất CSV</button>
+   <span id="cqt-qc-totals"></span>
+  </div>
+  <div id="cqt-qc-criteria"></div>
+  <div class="cqt-qc-toolbar">
+   <input id="cqt-qc-search" class="cqt-input" type="search" aria-label="Tìm lỗi" placeholder="Tìm frame, object, class hoặc lỗi" />
+   <select id="cqt-qc-type" class="cqt-input" aria-label="Loại lỗi"></select>
+   <select id="cqt-qc-review" class="cqt-input" aria-label="Lọc theo trạng thái duyệt">
+    <option value="">Mọi trạng thái</option><option value="pending">Chưa duyệt</option>
+    <option value="reviewed">Đã duyệt</option><option value="deferred">Để sau</option>
+   </select>
+  </div>
+  <p id="cqt-qc-status" role="status"></p>
+  <div class="cqt-qc-list">
+   <table><thead><tr><th scope="col">Frame / Object</th><th scope="col">Class</th><th scope="col">Loại lỗi</th><th scope="col">Chi tiết</th><th scope="col">Duyệt</th></tr></thead><tbody id="cqt-qc-rows"></tbody></table>
+   <p id="cqt-qc-empty"></p>
+  </div>
+  <footer class="cqt-qc-toolbar">
+   <button id="cqt-qc-prev" class="cqt-btn cqt-btn-secondary">Trang trước</button>
+   <span id="cqt-qc-page"></span>
+   <button id="cqt-qc-next" class="cqt-btn cqt-btn-secondary">Trang sau</button>
+  </footer>`;
+ root.appendChild(box);
+ $('cqt-qc-criteria').appendChild(options);
+ const bind = (id, action, event = 'click') => $(id).addEventListener(event, guarded(action));
+ bind('cqt-qc-close', () => closeQCWorkspace());
+ bind('cqt-qc-scan', scanQA);
+ bind('cqt-qc-export', () => exportQA({ review: true }));
+ bind('cqt-qc-preview', () => previewAutoFix(true));
+ bind('cqt-qc-prev', () => { qcPage--; renderQC(); });
+ bind('cqt-qc-next', () => { qcPage++; renderQC(); });
+ for (const [id, event] of [['cqt-qc-search', 'input'], ['cqt-qc-type', 'change'], ['cqt-qc-review', 'change']]) {
+  bind(id, () => { qcPage = 0; renderQC(); }, event);
+ }
+ renderQC();
+ $('cqt-qc-search').focus();
 }
 
 function csvEscape(value) {
@@ -5366,15 +5581,19 @@ function csvEscape(value) {
  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-function exportQA() {
+function exportQA(options) {
  if (safeData()) {
   return fail('Đang bật Chế độ an toàn dữ liệu: không xuất file CSV chứa dữ liệu annotation ra máy. Tắt ở tab Cài đặt nếu cần xuất.');
  }
  if (!lastQA?.rows.length) return fail('Chưa có dữ liệu QA. Bấm "Quét QA" trước.');
  const header = ['Frame', 'Item ID', 'Track ID', 'Class', 'Loại kiểm tra', 'Mô tả', 'Giá trị', 'Ngưỡng / Chuẩn', 'Track liên quan'];
+ if (options?.review) header.push('Trạng thái duyệt');
  const lines = [header.join(',')];
+ const reviewLabels = { pending: 'Chưa duyệt', reviewed: 'Đã duyệt', deferred: 'Để sau' };
  for (const r of lastQA.rows) {
-  lines.push([r.frame, r.itemId, r.trackId, r.cls, r.type, r.desc, r.value, r.threshold, r.related].map(csvEscape).join(','));
+  const fields = [r.frame, r.itemId, r.trackId, r.cls, r.type, r.desc, r.value, r.threshold, r.related];
+  if (options?.review) fields.push(reviewLabels[qcReviewState(r)]);
+  lines.push(fields.map(csvEscape).join(','));
  }
  const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
  const url = URL.createObjectURL(blob);
@@ -5923,10 +6142,11 @@ function planFixes(qa, types) {
  return ops;
 }
 
-async function previewAutoFix() {
- const qa = lastQA || await scanQA();
+async function previewAutoFix(filtered = false) {
+ const qa = !lastQA || qcDirty ? await scanQA() : lastQA;
  if (!qa) return;
- const ops = planFixes(qa, new Set(['missingTrack', 'duplicateTrack', 'unknownClass', 'size', 'yaw', 'ground', 'far', 'overlap']));
+ const scoped = filtered === true ? { ...qa, rows: qcFilteredRows() } : qa;
+ const ops = planFixes(scoped, new Set(['missingTrack', 'duplicateTrack', 'unknownClass', 'size', 'yaw', 'ground', 'far', 'overlap']));
  if (!ops.length) return setStatus('✅ Không có lỗi nào cần sửa.', 'success');
  openFixPreview('Xem trước auto-fix QA', ops);
 }
@@ -5942,7 +6162,7 @@ async function previewFixForTarget(kind) {
  setStatus(`⏳ Đang quét ${who}...`);
  const data = await scanJobData(b.start, b.stop, new Set(ids));
  if (!data.tracks.size) return fail(`Không thấy ${who} trong job.`);
- const rows = runQAChecks(data, opts);
+ const rows = await runQAChecks(data, opts);
  const ops = planFixes({ rows, data, opts }, new Set([kind]));
  if (!ops.length) {
   return setStatus(kind === 'yaw'
@@ -6083,7 +6303,6 @@ function openFixPreview(title, ops) {
 }
 
 async function applyFixes(title, ops) {
- const batch = createBatch(title);
  // Đổi label trước (có thể đặt lại thuộc tính), rồi track_id, size, yaw, chạm đất (sau size/yaw vì 2 cái đó đổi góc đáy);
  // outside làm cuối vì ẩn frame
  const order = { unknownClass: 0, missingTrack: 1, size: 2, seq: 2, yaw: 3, ground: 4, duplicateTrack: 5, far: 6 };
@@ -6092,6 +6311,7 @@ async function applyFixes(title, ops) {
   const err = paramError(sorted[i]);
   if (err) return fail(`${sorted[i].title}: ${err}`);
  }
+ const batch = createBatch(title);
  for (let i = 0; i < sorted.length; i++) {
   setStatus(`⏳ Đang sửa ${i + 1}/${sorted.length}: ${sorted[i].title}`);
   await sorted[i].apply(batch, paramValues(sorted[i]));
@@ -6161,8 +6381,9 @@ function canvasRect() {
 function pointerOverCanvas(x, y) {
  const r = canvasRect();
  if (!r || x < r.left || x > r.right || y < r.top || y > r.bottom) return false;
- // Cửa sổ Full Control / ô nhìn nhúng phủ lên canvas thì không coi là đang trỏ vào canvas 3D
- return !document.elementFromPoint(x, y)?.closest?.('#cqt-fc-window, .cqt-dock-view, #cqt-item-panel');
+ return !document.elementFromPoint(x, y)?.closest?.(
+  '#cqt-fc-window, #cvat-quicktool-panel, #cqt-modal, #cqt-qc-workspace, .cqt-dock-view, #cqt-item-panel, #cqt-health-pill',
+ );
 }
 
 function mouseRay(x, y) {
@@ -6484,20 +6705,26 @@ function transformTargets() {
  if (selection.size && (id === null || selection.has(id))) {
   return id === null ? [...selection] : [id, ...[...selection].filter((x) => x !== id)];
  }
- return id === null ? [] : [id];
+ const target = id ?? resolveTargetId();
+ return Number.isInteger(target) ? [target] : [];
 }
 
+let transformRequest = 0;
 async function startTransform(mode) {
  const ids = transformTargets();
  const frame = getFrame();
- if (!ids.length || !Number.isInteger(frame)) return;
+ if (!ids.length) return fail('Chọn cuboid trên canvas hoặc nhập Target ID trước.');
+ if (!Number.isInteger(frame) || annotationState()?.player.frame.fetching) return;
+ const request = ++transformRequest;
+ const startMouse = { ...lastMouse };
  const states = await getStates(frame);
+ if (request !== transformRequest || getFrame() !== frame || !getJob() || xf.active) return;
  const items = [];
  let locked = 0;
  for (const id of ids) {
   const s = states.find((x) => x.clientID === id);
   if (!isCuboid(s) || s.outside) continue;
-  if (s.lock) { locked++; continue; }
+  if (s.lock || s.isGroundTruth) { locked++; continue; }
   const mesh = findDrawnMesh(id);
   items.push({
    id, state: s, orig: [...s.points], points: [...s.points], mesh,
@@ -6512,14 +6739,27 @@ async function startTransform(mode) {
  const pivot = [0, 1, 2].map((k) => items.reduce((sum, it) => sum + it.orig[k], 0) / items.length);
  Object.assign(xf, {
   active: true, mode, axis: null, local: false, typed: '', frame, items, pivot,
-  startMouse: { ...lastMouse }, info: '',
+  startMouse, info: '',
  });
  if (locked) setStatus(`🔒 Bỏ qua ${locked} box đang bị khoá.`, 'warn');
  updateTransform();
 }
 
+let transformRaf = 0;
+let transformSnap = false;
+function scheduleTransformPreview(snap) {
+ transformSnap = snap;
+ if (transformRaf) return;
+ transformRaf = requestAnimationFrame(() => {
+  transformRaf = 0;
+  updateTransform(transformSnap);
+ });
+}
+
 function endTransform() {
  xf.active = false;
+ cancelAnimationFrame(transformRaf);
+ transformRaf = 0;
  hud(null);
  swallowClicksUntil = Date.now() + 300;
 }
@@ -6531,6 +6771,8 @@ function cancelTransform() {
 }
 
 async function confirmTransform() {
+ if (!xf.active) return;
+ if (getFrame() !== xf.frame) return cancelTransform();
  const { items, frame, mode } = xf;
  endTransform();
  const moved = items.filter((it) => it.points.some((v, i) => Math.abs(v - it.orig[i]) > 1e-9));
@@ -6656,6 +6898,7 @@ const SHORTCUT_ACTIONS = {
  Backslash: () => toggleStealthUI(),
  KeyM: () => toggleFullControl(),
  KeyV: () => toggleDockViews(),
+ KeyU: () => openQCWorkspace(),
  KeyN: () => toggleItemPanel(),
  KeyA: () => autoDetectAndSpan(),
  KeyB: (e) => (e.shiftKey ? clearAllAnchors() : toggleAnchorUnderPointer()),
@@ -6681,11 +6924,11 @@ const SHORTCUT_ACTIONS = {
 };
 
 let shortcutUntil = 0;
-function hasNativePrefix() {
+function hasNativePrefix(shortcut = 'alt+q+shift') {
  return Object.values(store.getState().shortcuts.keyMap).some(({ sequences = [] }) =>
   sequences.some((sequence) => typeof sequence === 'string' &&
    sequence.toLowerCase().trim().split(/\s+/)[0].split('+')
-    .map((part) => part === 'option' ? 'alt' : part).sort().join('+') === 'alt+q+shift'));
+    .map((part) => part === 'option' ? 'alt' : part).sort().join('+') === shortcut));
 }
 
 function onKeyDown(e) {
@@ -6699,15 +6942,26 @@ function onKeyDown(e) {
   }
   return;
  }
- if (e.target === $('cvat-quicktool-handle') && ['Enter', ' '].includes(e.key)) {
+ if (e.target === launcher && ['Enter', ' '].includes(e.key)) {
   swallow(e);
   if (!e.repeat) togglePanel();
   return;
  }
+ if (e.key === 'Escape') transformRequest++;
  if (e.key === 'Escape' && Date.now() <= shortcutUntil) {
   shortcutUntil = 0;
   swallow(e);
   $('cqt-toast')?.classList.remove('show');
+  return;
+ }
+ if (e.key === 'Escape' && $('cqt-modal')) {
+  swallow(e);
+  $('cqt-modal').querySelector('.cqt-modal-x')?.click();
+  return;
+ }
+ if (e.key === 'Escape' && $('cqt-qc-workspace')) {
+  swallow(e);
+  closeQCWorkspace();
   return;
  }
  if (fc.open && e.key === 'Escape' && !isTyping(e)) {
@@ -6718,6 +6972,11 @@ function onKeyDown(e) {
  }
  if (isTyping(e)) { shortcutUntil = 0; return; }
 
+ if (e.code === 'KeyQ' && e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && !hasNativePrefix('alt+q')) {
+  swallow(e);
+  if (!e.repeat) togglePanel();
+  return;
+ }
  if (e.code === 'KeyQ' && e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && !hasNativePrefix()) {
   swallow(e);
   if (!e.repeat) {
@@ -6726,45 +6985,61 @@ function onKeyDown(e) {
   }
   return;
  }
- if (Date.now() > shortcutUntil || ['Alt', 'Shift', 'Meta', 'Control'].includes(e.key)) return;
+ if (['Alt', 'Shift', 'Meta', 'Control'].includes(e.key)) return;
+ const armed = Date.now() <= shortcutUntil;
  shortcutUntil = 0;
- if (e.repeat || e.altKey || e.ctrlKey || e.metaKey) return;
+ if (e.repeat || e.ctrlKey || e.metaKey) return;
 
+ const transform = TRANSFORM_KEYS[e.code];
+ const direct = !e.altKey && !e.shiftKey;
+ const mode = annotationState()?.canvas?.instance?.mode?.();
+ if (transform && (armed || direct) && getSettings().blenderKeys && (!mode || mode === 'idle') &&
+     pointerOverCanvas(lastMouse.x, lastMouse.y) && transformTargets().length) {
+  swallow(e);
+  if (armed) markShortcut(e);
+  void guarded(() => startTransform(transform))();
+  return;
+ }
+ if (!armed || e.altKey) return;
  const action = SHORTCUT_ACTIONS[e.code];
  const camera = NUMPAD_VIEWS[e.code];
- const transform = TRANSFORM_KEYS[e.code];
- if (!action && !camera && !transform) return;
- if (transform && (!getSettings().blenderKeys || !pointerOverCanvas(lastMouse.x, lastMouse.y))) return;
+ if (!action && !camera) return;
  swallow(e);
  markShortcut(e);
  if (action) void guarded(action)(e);
- else if (camera) void guarded(() => cameraView(camera, e.shiftKey))();
- else if (transformTargets().length) startTransform(transform);
+ else void guarded(() => cameraView(camera, e.shiftKey))();
 }
 
 function installGlobalHandlers() {
 
  listen(window, 'keydown', onKeyDown, true);
- listen(window, 'blur', () => { shortcutUntil = 0; });
+ listen(window, 'blur', () => {
+  shortcutUntil = 0;
+  transformRequest++;
+  if (xf.active) cancelTransform();
+ });
  listen(window, 'mousemove', (e) => {
   lastMouse = { x: e.clientX, y: e.clientY };
-  if (xf.active) updateTransform(e.ctrlKey || e.shiftKey);
+  if (xf.active) scheduleTransformPreview(e.ctrlKey || e.shiftKey);
   if (getExplicitAnchorIds().length > 0 && !stealthUI && !fc.open) renderAnchorOverlay();
  }, true);
  listen(window, 'wheel', () => {
   if (getExplicitAnchorIds().length > 0 && !stealthUI && !fc.open) renderAnchorOverlay();
  }, { passive: true });
- listen(window, 'mousedown', (e) => {
+ listen(window, 'pointerdown', (e) => {
   if (!xf.active) return;
   swallow(e);
   // macOS biến Ctrl + Click trái thành button 2 (chuột phải) => vẫn coi là xác nhận
   const isConfirm = e.button === 0 || (IS_MAC && e.button === 2 && e.ctrlKey);
-  if (isConfirm) confirmTransform();
+  if (isConfirm && pointerOverCanvas(e.clientX, e.clientY)) {
+   updateTransform(e.ctrlKey || e.shiftKey);
+   void guarded(confirmTransform)();
+  }
   else cancelTransform();
  }, true);
  for (const type of ['mouseup', 'click', 'contextmenu']) {
   listen(window, type, (e) => {
-   if (xf.active || Date.now() < swallowClicksUntil) swallow(e);
+   if (xf.active || (Date.now() < swallowClicksUntil && pointerOverCanvas(e.clientX, e.clientY))) swallow(e);
   }, true);
  }
  // Shift / Cmd + Click trên canvas hoặc danh sách object => thêm/bớt khỏi nhóm chọn
@@ -6854,7 +7129,13 @@ const fc = {
  cfg: { ...FC_DEFAULTS },
  targetId: null,
  allRows: [], // { frame, key, outside, base, draft, ground, el, visible, camAz, camEl }
- rows: [], // allRows sau bộ lọc, đúng thứ tự hiển thị
+ rowsByFrame: new Map(),
+ rows: [], // hàng đang hiển thị
+ filteredRows: [],
+ layout: null,
+ focusFrame: null,
+ healthStats: null,
+ toolsOpen: false,
  selected: new Set(), // frame
  lastClicked: null,
  harvesting: false,
@@ -7201,7 +7482,7 @@ function fcPassSlice(view, eu, ev, ew, hl, hw, hh) {
 
 // ---- Dữ liệu track ----
 function fcRowByFrame(frame) {
- return fc.allRows.find((r) => r.frame === frame) || null;
+ return fc.rowsByFrame.get(frame) || null;
 }
 
 function fcPoints(row) {
@@ -7272,15 +7553,53 @@ function fcComputeHealthStats() {
 }
 
 function fcApplyFilter() {
- fcComputeHealthStats();
+ fc.healthStats = fcComputeHealthStats();
  const start = intVal('cqt-frame-start'), end = intVal('cqt-frame-end');
  const hasRange = Number.isInteger(start) && Number.isInteger(end);
- fc.rows = fc.allRows.filter((r) => {
+ fc.filteredRows = fc.allRows.filter((r) => {
   if (fc.cfg.filter === 'key') return r.key;
   if (fc.cfg.filter === 'range' && hasRange) return r.frame >= start && r.frame <= end;
   if (fc.cfg.filter === 'issue') return !!r.hasIssue;
   return true;
  });
+ const focused = fc.filteredRows.find((row) => row.frame === fc.focusFrame) ||
+  fc.filteredRows.find((row) => row.frame === (fc.lastClicked ?? getFrame())) || fc.filteredRows[0];
+ fc.focusFrame = focused?.frame ?? null;
+ fc.rows = fcLayout() === 'focus' && focused ? [focused] : fc.filteredRows;
+}
+
+function fcLayout() {
+ return fc.layout || (fc.allRows.length === 1 ? 'focus' : 'table');
+}
+
+async function fcStepFocus(direction) {
+ const idx = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
+ const next = fc.filteredRows[idx + direction];
+ if (!next) return;
+ if (fc.toolsOpen && !(await goToFrame(next.frame))) return fail(`Không mở được frame ${next.frame}.`);
+ fc.focusFrame = next.frame;
+ fcRenderList();
+ if (fc.toolsOpen) await jumpTo(fc.targetId, next.frame);
+ if (fc.cfg.live3d) await fcSyncLiveCVAT(next.frame);
+}
+
+async function fcToggleTools() {
+ if (fc.toolsOpen) {
+  fc.toolsOpen = false;
+  root.classList.remove('cqt-fc-tools-open');
+  panelApi?.setPinned(fc.panelWasOpen);
+ } else {
+  if (!Number.isInteger(fc.targetId)) return fail('Nạp Track trước khi mở công cụ.');
+  const frame = fcLayout() === 'focus' ? fc.focusFrame : (fc.lastClicked ?? getFrame());
+  if (Number.isInteger(frame) && !(await goToFrame(frame))) return fail(`Không mở được frame ${frame}.`);
+  if (!fc.open) return;
+  await jumpTo(fc.targetId, frame);
+  fc.panelWasOpen = !$('cvat-quicktool-panel').inert;
+  fc.toolsOpen = true;
+  root.classList.add('cqt-fc-tools-open');
+  panelApi?.setPinned(true);
+ }
+ $('cqt-fc-tools')?.setAttribute('aria-pressed', String(fc.toolsOpen));
 }
 
 // Cùng 1 tỉ lệ m/px cho mọi hàng để so sánh trực quan giữa các frame
@@ -7303,6 +7622,7 @@ async function fcLoadTrack(id = intVal('cqt-fc-target')) {
  setStatus(`Full Control: đang đọc track #${id}...`, 'info');
  const list = await collectTrack(id, b.start, b.stop, { includeOutside: true });
  if (!list.length) return fail(`Không thấy object #${id} trong job.`);
+ if (fc.toolsOpen && id !== fc.targetId) await fcToggleTools();
  fc.targetId = id;
  setField('cqt-fc-target', id);
  fc.allRows = list.map(({ frame, state }) => ({
@@ -7316,8 +7636,10 @@ async function fcLoadTrack(id = intVal('cqt-fc-target')) {
   el: null,
   visible: false,
  }));
+ fc.rowsByFrame = new Map(fc.allRows.map((row) => [row.frame, row]));
  fc.selected.clear();
  fc.lastClicked = null;
+ fc.focusFrame = getFrame();
  fcComputeExtent();
  fcRenderList();
  await fcHarvest(false);
@@ -8057,6 +8379,8 @@ function fcRender3D(row, canvas, g, pal) {
  }
 }
 
+const projectionPaths = new WeakMap();
+
 function fcRenderView(row, canvas) {
  const view = canvas.dataset.view;
  if (view === '3d' && !fc.cfg.show3d) return;
@@ -8120,35 +8444,42 @@ function fcRenderView(row, canvas) {
  // Point cloud: lọc hành lang độ sâu (Slice) + phân loại trong box (sáng) / mặt đất / xung quanh
  const cloud = fcCloud(row);
  if (cloud) {
-  const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
-  const R = rotationMatrix(p[3], p[4], p[5]);
-  const hl = Math.abs(p[6]) / 2, hw = Math.abs(p[7]) / 2, hh = Math.abs(p[8]) / 2;
-  const inside = new Path2D(), around = new Path2D(), ground = new Path2D();
-  const sz = g.k > 60 ? 2 : 1.5;
-  let nIn = 0;
-  for (let i = 0; i + 2 < cloud.length; i += 3) {
-   const x = cloud[i], y = cloud[i + 1], z = cloud[i + 2];
-   const ex = x - p[0], ey = y - p[1], ez = z - p[2];
-   const eu = R[0][0] * ex + R[1][0] * ey + R[2][0] * ez;
-   const ev = R[0][1] * ex + R[1][1] * ey + R[2][1] * ez;
-   const ew = R[0][2] * ex + R[1][2] * ey + R[2][2] * ez;
-   const isIn = Math.abs(eu) <= hl && Math.abs(ev) <= hw && Math.abs(ew) <= hh;
-   if (isIn && view === 'top') nIn++;
-   if (!isIn && !fcPassSlice(view, eu, ev, ew, hl, hw, hh)) continue;
-   const dx = x - anchor[0], dy = y - anchor[1];
-   const [h, vert] = fcProject(view, dx * ac + dy * as, -dx * as + dy * ac, z - anchor[2]);
-   const sx = g.cx + h * g.k, sy = g.cy - vert * g.k;
-   if (sx < 0 || sy < 0 || sx > g.cw || sy > g.ch) continue;
-   const target = isIn ? inside : plane && z - planeZ(plane, x, y) < 0.12 ? ground : around;
-   target.rect(sx - sz / 2, sy - sz / 2, sz, sz);
+  // During a drag, keep the cloud fixed and move only the cuboid overlay.
+  const sampleBox = anchor;
+  const key = [g.cw, g.ch, g.k, g.cx, g.cy, fc.cfg.slice, plane?.a, plane?.b, plane?.c].join('|');
+  let paths = projectionPaths.get(canvas);
+  if (paths?.cloud !== cloud || paths?.anchor !== anchor || paths?.key !== key) {
+   const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
+   const R = rotationMatrix(sampleBox[3], sampleBox[4], sampleBox[5]);
+   const hl = Math.abs(sampleBox[6]) / 2, hw = Math.abs(sampleBox[7]) / 2, hh = Math.abs(sampleBox[8]) / 2;
+   const inside = new Path2D(), around = new Path2D(), ground = new Path2D();
+   const sz = g.k > 60 ? 2 : 1.5;
+   let nIn = 0;
+   for (let i = 0; i + 2 < cloud.length; i += 3) {
+    const x = cloud[i], y = cloud[i + 1], z = cloud[i + 2];
+    const ex = x - anchor[0], ey = y - anchor[1], ez = z - anchor[2];
+    const eu = R[0][0] * ex + R[1][0] * ey + R[2][0] * ez;
+    const ev = R[0][1] * ex + R[1][1] * ey + R[2][1] * ez;
+    const ew = R[0][2] * ex + R[1][2] * ey + R[2][2] * ez;
+    const isIn = Math.abs(eu) <= hl && Math.abs(ev) <= hw && Math.abs(ew) <= hh;
+    if (isIn && view === 'top') nIn++;
+    if (!isIn && !fcPassSlice(view, eu, ev, ew, hl, hw, hh)) continue;
+    const [h, vert] = fcProject(view, ex * ac + ey * as, -ex * as + ey * ac, ez);
+    const sx = g.cx + h * g.k, sy = g.cy - vert * g.k;
+    if (sx < 0 || sy < 0 || sx > g.cw || sy > g.ch) continue;
+    const target = isIn ? inside : plane && z - planeZ(plane, x, y) < 0.12 ? ground : around;
+    target.rect(sx - sz / 2, sy - sz / 2, sz, sz);
+   }
+   paths = { cloud, anchor, key, ground, around, inside, nIn };
+   projectionPaths.set(canvas, paths);
   }
   ctx.fillStyle = pal.ptGround;
-  ctx.fill(ground);
+  ctx.fill(paths.ground);
   ctx.fillStyle = pal.ptAround;
-  ctx.fill(around);
+  ctx.fill(paths.around);
   ctx.fillStyle = pal.ptInside;
-  ctx.fill(inside);
-  if (view === 'top') row.pointsIn = nIn;
+  ctx.fill(paths.inside);
+  if (view === 'top') row.pointsIn = paths.nIn;
  }
 
  // Box 2D chuẩn xác theo mặt cắt (không bị phình kép khi có cả Pitch & Roll) + 8 tay nắm (4 góc chéo + 4 cạnh)
@@ -8439,10 +8770,7 @@ function fcUpdateRowMeta(row) {
  const syncDot = el.querySelector('[data-role="sync-dot"]');
  const limDot = el.querySelector('[data-role="limit-dot"]');
  if (!row.outside && fc.allRows.length) {
-  const visRows = fc.allRows.filter((r) => !r.outside);
-  const medL = median(visRows.map((r) => Math.abs(r.base[6])));
-  const medW = median(visRows.map((r) => Math.abs(r.base[7])));
-  const medH = median(visRows.map((r) => Math.abs(r.base[8])));
+  const { visRows, medL, medW, medH } = fc.healthStats || fcComputeHealthStats();
   const dl = Math.abs(p[6]) - medL, dw = Math.abs(p[7]) - medW, dh = Math.abs(p[8]) - medH;
   const unsync = visRows.length > 1 && Math.max(Math.abs(dl), Math.abs(dw), Math.abs(dh)) > 0.005;
   if (syncDot) {
@@ -8476,6 +8804,7 @@ function fcUpdateRowMeta(row) {
 }
 
 function fcRefreshAll() {
+ fc.healthStats = fcComputeHealthStats();
  for (const row of fc.rows) fcUpdateRowMeta(row);
  fcRerenderVisible();
  fcUpdateBars();
@@ -8483,7 +8812,7 @@ function fcRefreshAll() {
 
 function fcUpdateBars() {
  if (!fc.el) return;
- const h = fcComputeHealthStats();
+ const h = fc.healthStats || fcComputeHealthStats();
  const start = intVal('cqt-frame-start'), end = intVal('cqt-frame-end');
  const hasRange = Number.isInteger(start) && Number.isInteger(end);
  const counts = {
@@ -8494,6 +8823,18 @@ function fcUpdateBars() {
  };
  fc.el.querySelectorAll('[data-count]').forEach((s) => { s.textContent = String(counts[s.dataset.count] ?? 0); });
  fc.el.querySelectorAll('[data-fc-filter]').forEach((b) => b.classList.toggle('active', b.dataset.fcFilter === fc.cfg.filter));
+ const layout = fcLayout();
+ fc.el.classList.toggle('focus-layout', layout === 'focus');
+ for (const button of fc.el.querySelectorAll('[data-fc-layout]')) {
+  const active = button.dataset.fcLayout === layout;
+  button.classList.toggle('active', active);
+  button.setAttribute('aria-pressed', String(active));
+ }
+ const position = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
+ $('cqt-fc-focus-label').textContent = position >= 0
+  ? `F${fc.focusFrame} · ${position + 1}/${fc.filteredRows.length}` : '—';
+ $('cqt-fc-focus-prev').disabled = position <= 0;
+ $('cqt-fc-focus-next').disabled = position < 0 || position >= fc.filteredRows.length - 1;
  const healthBox = $('cqt-fc-health-badges');
  if (healthBox) {
   if (!fc.allRows.length) {
@@ -8646,7 +8987,14 @@ function fcSelectClick(row, e) {
   fc.lastClicked = row.frame;
  }
  fcUpdateSelectionUI();
- if (fc.cfg.live3d) guarded(() => fcSyncLiveCVAT(row.frame))();
+ if (fc.cfg.live3d) void guarded(() => fcSyncLiveCVAT(row.frame))();
+ else if (fc.toolsOpen) void guarded(async () => {
+  if (await goToFrame(row.frame)) await jumpTo(fc.targetId, row.frame);
+  else {
+   await fcToggleTools();
+   fail(`Không mở được frame ${row.frame}. Đã đóng panel để tránh chỉnh nhầm frame.`);
+  }
+ })();
 }
 
 function fcProgress(done, total) {
@@ -8825,7 +9173,14 @@ function fcStartCanvasDrag(e, row, canvas) {
   fc.selected = new Set([row.frame]);
   fc.lastClicked = row.frame;
   fcUpdateSelectionUI();
-  if (fc.cfg.live3d) guarded(() => fcSyncLiveCVAT(row.frame))();
+  if (fc.cfg.live3d) void guarded(() => fcSyncLiveCVAT(row.frame))();
+ else if (fc.toolsOpen) void guarded(async () => {
+  if (await goToFrame(row.frame)) await jumpTo(fc.targetId, row.frame);
+  else {
+   await fcToggleTools();
+   fail(`Không mở được frame ${row.frame}. Đã đóng panel để tránh chỉnh nhầm frame.`);
+  }
+ })();
  }
 
  fc.hover = null;
@@ -9171,6 +9526,8 @@ const FC_HTML = `
    <button id="cqt-fc-stop" class="cqt-btn cqt-btn-danger cqt-sm cqt-none" style="display:none;" title="Dừng quét cloud (giữ phần đã nạp)">Dừng</button>
   </div>
   <div class="cqt-fc-head-actions">
+   <button id="cqt-fc-tools" class="cqt-btn cqt-btn-secondary cqt-sm" aria-pressed="false">Công cụ Toolbox</button>
+   <button id="cqt-fc-qc" class="cqt-btn cqt-btn-secondary cqt-sm">QA/QC</button>
    <button id="cqt-fc-theme" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Đổi giao diện Sáng (Light) / Tối (Dark)"></button>
    <button id="cqt-fc-undo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled title="Hoàn tác thao tác gần nhất (${KEY_PREFIX}Z)">${ICONS.undo}<span>Undo</span></button>
    <button id="cqt-fc-redo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled title="Làm lại thao tác vừa hoàn tác (${KEY_PREFIX}${IS_MAC ? '⇧Z' : 'Shift+Z'})">${ICONS.redo}<span>Redo</span></button>
@@ -9188,8 +9545,20 @@ const FC_HTML = `
    <button data-fc-filter="range" title="Theo dải Start–End trên panel chính">Dải Start–End <span data-count="range">0</span></button>
    <button data-fc-filter="issue" title="Chỉ hiện các frame bị lệch LWH (đỏ) hoặc vượt Limit (cam)">Lỗi <span data-count="issue">0</span></button>
   </div>
-  <div id="cqt-fc-health-badges" class="cqt-hp-badges" style="flex-wrap:nowrap;"></div>
-  <span class="cqt-fc-sep"></span>
+  <div class="cqt-fc-seg" aria-label="Bố cục Full Control">
+   <button type="button" data-fc-layout="table" aria-pressed="true">Bảng track</button>
+   <button type="button" data-fc-layout="focus" aria-pressed="false">Frame lớn</button>
+  </div>
+  <div class="cqt-fc-focus-nav">
+   <button id="cqt-fc-focus-prev" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame trước">‹</button>
+   <span id="cqt-fc-focus-label" class="cqt-label"></span>
+   <button id="cqt-fc-focus-next" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame sau">›</button>
+  </div>
+  <div id="cqt-fc-health-badges" class="cqt-hp-badges"></div>
+ </div>
+ <details class="cqt-fc-disclosure">
+ <summary>Hiển thị và điều khiển</summary>
+ <div class="cqt-fc-bar">
   <label class="cqt-fc-ctl" title="Chiều cao mỗi hàng frame">Cỡ hàng <input type="range" id="cqt-fc-rowh" min="100" max="360" step="10" /></label>
   <label class="cqt-fc-ctl" title="Phóng to hình chiếu (hoặc Alt/Ctrl + lăn chuột trên danh sách)">Zoom <input type="range" id="cqt-fc-zoom" min="0.5" max="4" step="0.1" /><span id="cqt-fc-zoom-val" class="cqt-label"></span></label>
   <span class="cqt-fc-sep"></span>
@@ -9229,12 +9598,14 @@ const FC_HTML = `
     <option value="right">Sườn phải (-Y)</option>
    </select>
   </label>
-  <span class="cqt-fc-hint">Núm ● TOP = Yaw · SIDE = Pitch · FRONT = Roll · Cột 3D: kéo ◉ dịch box (Shift = cao độ Z), kéo nền xoay 3D</span>
  </div>
+ </details>
 
+ <details class="cqt-fc-disclosure" open>
+ <summary>Thao tác theo frame và track</summary>
  <div class="cqt-fc-bar cqt-fc-batch">
   <span class="cqt-label"><b id="cqt-fc-selcount" style="color:var(--cqt-text);">0</b> frame đang chọn</span>
-  <button id="cqt-fc-sel-all" class="cqt-btn cqt-btn-secondary cqt-sm">Chọn tất cả</button>
+  <button id="cqt-fc-sel-all" class="cqt-btn cqt-btn-secondary cqt-sm" title="Chọn các frame khớp bộ lọc, kể cả khi đang xem một frame">Chọn frame đã lọc</button>
   <button id="cqt-fc-sel-none" class="cqt-btn cqt-btn-secondary cqt-sm">Bỏ chọn</button>
   <span class="cqt-fc-sep"></span>
   <span class="cqt-label">L</span><input id="cqt-fc-l" type="number" step="0.01" class="cqt-input cqt-mini" />
@@ -9269,7 +9640,9 @@ const FC_HTML = `
    <button id="cqt-fc-confirm-in" class="cqt-btn cqt-btn-secondary cqt-sm cqt-hp-btn-in" title="Xác nhận khôi phục Inside (hiện lại) theo phạm vi bên trái">${ICONS.eye}<span>Inside</span></button>
   </div>
  </div>
+ </details>
 
+ <div class="cqt-fc-grid">
  <div class="cqt-fc-cols">
   <div>Frame</div>
   <div>Top · nhìn từ trên (xoay Yaw ↑)</div>
@@ -9279,6 +9652,7 @@ const FC_HTML = `
   <div>Thông số</div>
  </div>
  <div class="cqt-fc-list" id="cqt-fc-list"></div>
+ </div>
  <div id="cqt-fc-status" class="cqt-fc-status">Sẵn sàng.</div>
 `;
 
@@ -9402,6 +9776,15 @@ function fcBindWindow(el) {
  // Header
  on('cqt-fc-theme', toggleTheme);
  on('cqt-fc-close', closeFullControl);
+ on('cqt-fc-tools', fcToggleTools);
+ on('cqt-fc-qc', () => openQCWorkspace());
+ on('cqt-fc-focus-prev', () => fcStepFocus(-1));
+ on('cqt-fc-focus-next', () => fcStepFocus(1));
+ el.querySelectorAll('[data-fc-layout]').forEach((button) => button.addEventListener('click', () => {
+  fc.layout = button.dataset.fcLayout;
+  if (fc.layout === 'focus' && Number.isInteger(fc.lastClicked)) fc.focusFrame = fc.lastClicked;
+  fcRenderList();
+ }));
  on('cqt-fc-max', fcToggleMaximize);
  on('cqt-fc-undo', async () => { await restoreLatestSnapshot(); });
  on('cqt-fc-redo', async () => { await redoLatestSnapshot(); });
@@ -9511,7 +9894,7 @@ function fcBindWindow(el) {
 
  // Thao tác nhóm
  on('cqt-fc-sel-all', () => {
-  fc.selected = new Set(fc.rows.map((r) => r.frame));
+  fc.selected = new Set(fc.filteredRows.map((r) => r.frame));
   fcUpdateSelectionUI();
  });
  on('cqt-fc-sel-none', () => {
@@ -9737,6 +10120,7 @@ async function openFullControl(id) {
 
 function closeFullControl() {
  if (!fc.el) return;
+ if (fc.toolsOpen) void fcToggleTools();
  fc.open = false;
  fc.abort = true;
  fcCancelDrag();
@@ -9818,18 +10202,7 @@ function itemOn() {
 function cvatViewRect(view) {
  const el = getCanvas3dViews()?.[view]?.renderer?.domElement;
  if (!el?.isConnected) return null;
- let r = el.getBoundingClientRect();
- if (view !== 'perspective') {
-  // Tìm container cha chứa cả thanh tiêu đề trắng của CVAT (thường là .cvat-canvas3d-view hoặc parentElement)
-  const container = el.closest?.('.cvat-canvas3d-view') || el.parentElement;
-  if (container?.isConnected) {
-   const cr = container.getBoundingClientRect();
-   // Phủ trọn cả thanh header trắng của CVAT nếu container hợp lệ
-   if (cr.width > 40 && cr.height >= r.height && cr.top <= r.top && cr.top >= r.top - 60) {
-    r = cr;
-   }
-  }
- }
+ const r = el.getBoundingClientRect();
  return r && r.width > 40 && r.height > 40 ? { r, el } : null;
 }
 
@@ -9874,6 +10247,7 @@ function dockBindView(e, view) {
   if (act === 'expand') return openFullControl(dock.id ?? resolveTargetId());
   if (act === 'hide') {
    dock.hidden = true;
+   syncDockSettingsUI();
    dockLayout();
    return setStatus(`Đã ẩn ô nhìn nhúng, đang hiện ô gốc của CVAT. ${KEY_PREFIX}V để bật lại.`, 'info');
   }
@@ -9883,7 +10257,7 @@ function dockBindView(e, view) {
   ev.stopPropagation();
   if (ev.ctrlKey || ev.altKey || ev.metaKey) {
    dock.zoom = clamp(dock.zoom * (ev.deltaY < 0 ? 1.12 : 1 / 1.12), 0.4, 6);
-   return dockRender();
+   return scheduleDockRender();
   }
   // Gộp delta của touchpad/chuột: 1 nấc chuột ≈ 100px => 1 frame
   const unit = ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? 400 : 1;
@@ -10128,12 +10502,21 @@ async function dockStep(dir, keyOnly = false) {
 }
 
 // ---- Kéo sửa trên ô nhúng (dùng chung toán học/hit-test của Full Control) ----
+let dockRaf = 0;
+function scheduleDockRender() {
+ if (dockRaf) return;
+ dockRaf = requestAnimationFrame(() => {
+  dockRaf = 0;
+  dockRender();
+ });
+}
+
 function dockOnMouseMove(e) {
  const d = fc.drag;
  if (!d?.dock) return;
  if (d.type === 'edit') fcDragEdit(e);
  else if (d.type === 'pan2d') fcDragPan2D(e);
- dockRender();
+ scheduleDockRender();
 }
 
 async function dockOnMouseUp() {
@@ -10144,6 +10527,11 @@ async function dockOnMouseUp() {
   return dockRender();
  }
  const row = d.row;
+ if (getFrame() !== row.frame) {
+  row.draft = null;
+  void guarded(() => dockTick(true))();
+  return fail('Frame đã đổi. Hãy kéo lại trên frame hiện tại.');
+ }
  if (!d.moved || !row.draft) {
   row.draft = null;
   return dockRender();
@@ -11126,6 +11514,12 @@ function syncDockSettingsUI() {
  if (a) a.checked = !!s.dockViews;
  const b = $('cqt-set-item-panel');
  if (b) b.checked = !!s.itemPanel;
+ if (projectionButton) {
+  const enhanced = !!s.dockViews && !dock.hidden && !stealthUI;
+  projectionButton.textContent = enhanced ? 'Góc chiếu: Tool' : 'Góc chiếu: CVAT';
+  projectionButton.setAttribute('aria-pressed', String(enhanced));
+  projectionButton.title = 'Đổi TOP / SIDE / FRONT giữa Toolbox và CVAT';
+ }
 }
 
 function installDockHandlers() {
@@ -11164,10 +11558,11 @@ function installDockHandlers() {
 // Giao diện (shadcn/ui High-Contrast Dark & Light Architecture v3.9.0)
 // =========================================================================
 const STYLES = `
-#cvat-quicktool-wrapper, #cqt-fc-window, #cqt-modal, #cqt-hud, #cqt-toast, .cqt-dock-view, #cqt-item-panel, #cqt-health-pill { --cqt-bg: #09090b; --cqt-bg-bar: #0f0f13; --cqt-bg-card: #141418; --cqt-bg-elev: #1c1c22; --cqt-bg-hover: #272730; --cqt-bg-input: #09090b; --cqt-bg-view: #0b0b0e; --cqt-border: #3f3f46; --cqt-border-btn: #52525b; --cqt-border-strong: #71717a; --cqt-border-subtle: #27272f; --cqt-text: #fafafa; --cqt-text-sec: #e4e4e7; --cqt-text-muted: #a1a1aa; --cqt-text-dim: #71717a; --cqt-pri-bg: #fafafa; --cqt-pri-fg: #09090b; --cqt-pri-hover: #e4e4e7; --cqt-pri-kbd-bg: rgba(9,9,11,0.12); --cqt-pri-kbd-bd: rgba(9,9,11,0.24); --cqt-row-sel: rgba(250,250,250,0.045); --cqt-shadow: -12px 12px 32px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,255,255,0.06); --cqt-fc-shadow: 0 24px 64px rgba(0,0,0,0.85), 0 0 0 1px rgba(255,255,255,0.08); }
+#cvat-quicktool-wrapper, #cqt-fc-window, #cqt-modal, #cqt-qc-workspace, #cqt-hud, #cqt-toast, .cqt-dock-view, #cqt-item-panel, #cqt-health-pill { --cqt-bg: #09090b; --cqt-bg-bar: #0f0f13; --cqt-bg-card: #141418; --cqt-bg-elev: #1c1c22; --cqt-bg-hover: #272730; --cqt-bg-input: #09090b; --cqt-bg-view: #0b0b0e; --cqt-border: #3f3f46; --cqt-border-btn: #52525b; --cqt-border-strong: #71717a; --cqt-border-subtle: #27272f; --cqt-text: #fafafa; --cqt-text-sec: #e4e4e7; --cqt-text-muted: #a1a1aa; --cqt-text-dim: #71717a; --cqt-pri-bg: #fafafa; --cqt-pri-fg: #09090b; --cqt-pri-hover: #e4e4e7; --cqt-pri-kbd-bg: rgba(9,9,11,0.12); --cqt-pri-kbd-bd: rgba(9,9,11,0.24); --cqt-row-sel: rgba(250,250,250,0.045); --cqt-shadow: -12px 12px 32px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,255,255,0.06); --cqt-fc-shadow: 0 24px 64px rgba(0,0,0,0.85), 0 0 0 1px rgba(255,255,255,0.08); }
 #cvat-cuboid-toolbox.cqt-theme-light #cvat-quicktool-wrapper,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-fc-window,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-modal,
+#cvat-cuboid-toolbox.cqt-theme-light #cqt-qc-workspace,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-hud,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-toast,
 #cvat-cuboid-toolbox.cqt-theme-light .cqt-dock-view,
@@ -11513,7 +11908,7 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 6px 9px 8px; display: f
 `;
 
 const PANEL_HTML = `
-<button type="button" id="cvat-quicktool-handle" aria-expanded="false" aria-controls="cvat-quicktool-panel" title="Mở hoặc thu gọn Toolbox (${KEY_PREFIX}Q)">Cuboid Toolbox</button>
+<button type="button" id="cvat-quicktool-handle" aria-expanded="false" aria-controls="cvat-quicktool-panel" title="Mở hoặc thu gọn Toolbox (${OPTION_KEY}Q)">Cuboid Toolbox</button>
 <section id="cvat-quicktool-panel" aria-label="Cuboid Toolbox" inert>
 <div id="cvat-quicktool-header" title="Kéo để di chuyển panel theo chiều dọc">
 <div class="title">
@@ -11749,7 +12144,7 @@ ${ICONS.redo}
 </div>
 <label class="cqt-check" title="Khi click chọn object mới trên canvas, tự áp bộ sub-label đã lưu của label đó"><input type="checkbox" id="cqt-attr-auto" /> Tự áp khi chọn object mới</label>
 </div>
-<div class="cqt-hint">Trên canvas 3D: bấm tiền tố, rồi <b>G</b> (di chuyển) · <b>W</b> (xoay) · <b>S</b> (co giãn) · <b>X/Y/Z</b> khoá trục · giữ <b>Shift/Ctrl</b> bắt bước. Áp cho cả nhóm nếu đã Shift/Cmd+Click.</div>
+<div class="cqt-hint">Trên canvas 3D: bấm trực tiếp <b>G</b> (di chuyển) · <b>W</b> (xoay) · <b>S</b> (co giãn) · <b>X/Y/Z</b> khoá trục · giữ <b>Shift/Ctrl</b> bắt bước. Áp cho cả nhóm nếu đã Shift/Cmd+Click.</div>
 </div>
 <!-- ================= 2. GROUND (CHIA 2 BƯỚC RÕ RÀNG) ================= -->
 <div class="cqt-pane" data-pane="ground">
@@ -12035,7 +12430,8 @@ ${ICONS.redo}
 </div>
 </details>
 <div class="cqt-row">
-<button id="cqt-btn-qa-scan" class="cqt-btn cqt-btn-primary">Quét QA</button>
+<button id="cqt-btn-qc-workspace" class="cqt-btn cqt-btn-primary">Mở QA/QC</button>
+<button id="cqt-btn-qa-scan" class="cqt-btn cqt-btn-secondary">Quét QA</button>
 <button id="cqt-btn-qa-autofix" class="cqt-btn cqt-btn-secondary" title="Xem trước các sửa đề xuất, chọn rồi mới áp dụng">Xem trước Auto-fix</button>
 </div>
 <div class="cqt-row">
@@ -12064,16 +12460,17 @@ ${ICONS.redo}
 <label class="cqt-check" title="Không tự chuyển qua nhiều frame (CVAT sẽ tải dữ liệu frame từ server), không đọc tên file frame, không xuất CSV, không lưu toạ độ box vào localStorage"><input type="checkbox" id="cqt-set-safe-data" /> <b>Chế độ an toàn dữ liệu</b> (không tự tải thêm dữ liệu từ server)</label>
 <label class="cqt-check" title="Đè TOP / SIDE / FRONT kiểu Full Control lên 3 ô nhìn phụ của CVAT. Lăn chuột = frame trước/sau của object (${KEY_PREFIX}V)"><input type="checkbox" id="cqt-set-dock-views" /> Ô nhìn nhúng TOP / SIDE / FRONT trên layout CVAT</label>
 <label class="cqt-check" title="Bảng Location / Rotation / Dimensions sửa được ở góc ô 3D, kiểu N-panel của Blender (${KEY_PREFIX}N)"><input type="checkbox" id="cqt-set-item-panel" /> Bảng Item (toạ độ / góc / kích thước) trên ô 3D</label>
-<label class="cqt-check"><input type="checkbox" id="cqt-set-blender" /> Bật thao tác Blender sau tiền tố (G / W / S trên canvas)</label>
+<label class="cqt-check"><input type="checkbox" id="cqt-set-blender" /> Bật G / W / S khi con trỏ trên canvas 3D</label>
 <label class="cqt-check" title="Dùng khi canvas không tự cập nhật sau khi sửa"><input type="checkbox" id="cqt-set-bounce" /> Làm mới canvas bằng chuyển frame (dự phòng)</label>
 </div>
 <details class="cqt-card cqt-disclosure">
 <summary>Phím tắt Toolbox</summary>
-<p class="cqt-hint">Bấm <b>${KEY_PREFIX.split(' → ')[0]}</b>, nhả ra, rồi bấm lệnh trong 2,4 giây. Esc để huỷ.</p>
+<p class="cqt-hint">Bấm <b>${KEY_PREFIX.split(' → ')[0]}</b>, nhả ra, rồi bấm lệnh trong 2,4 giây. Esc để huỷ. ${OPTION_KEY}Q mở panel ngay.</p>
 <p class="cqt-hint" id="cqt-shortcut-conflict" hidden>Tiền tố trùng với một phím CVAT đã cấu hình. Đổi phím đó trong CVAT để dùng chuỗi Toolbox.</p>
 <div class="cqt-keymap-grid">
 <kbd class="cqt-kbd">Q / Shift+Q / &#92;</kbd><span>Mở hoặc thu gọn panel / ẩn hoặc hiện toàn bộ Toolbox (Stealth)</span>
 <kbd class="cqt-kbd">M / V / N</kbd><span>Full Control / ba ô nhìn nhúng / bảng Item</span>
+<kbd class="cqt-kbd">U</kbd><span>Mở không gian QA/QC</span>
 <kbd class="cqt-kbd">A</kbd><span>Chọn object hiện tại và dò dải track</span>
 <kbd class="cqt-kbd">B / Shift+B</kbd><span>Thêm hoặc bỏ Anchor dưới con trỏ / bỏ toàn bộ Anchor</span>
 <kbd class="cqt-kbd">P / Shift+P</kbd><span>Smart Snap / Smart Snap kèm Fit size</span>
@@ -12089,7 +12486,7 @@ ${ICONS.redo}
 <kbd class="cqt-kbd">F / &#96; / Num.</kbd><span>Focus camera vào target</span>
 <kbd class="cqt-kbd">1 / 2 / 3 / 7</kbd><span>Front / Top / Side / Top. Shift để nhìn phía đối diện</span>
 <kbd class="cqt-kbd">Num1 / Num7 / Num3</kbd><span>Front / Top / Side. Shift để nhìn phía đối diện</span>
-<kbd class="cqt-kbd">G / W / S</kbd><span>Khi con trỏ trên canvas 3D: di chuyển / xoay / co giãn</span>
+<kbd class="cqt-kbd">G / W / S</kbd><span>Trên canvas 3D: di chuyển / xoay / co giãn. Bấm trực tiếp hoặc sau tiền tố.</span>
 </div>
 <p class="cqt-hint">Khi đang kéo: X/Y/Z khoá trục · số, dấu chấm/phẩy và dấu trừ để nhập số · Backspace xoá ký tự · Enter/click trái để áp · Esc/click phải để huỷ · Shift/Ctrl khi kéo để bắt bước.</p>
 <p class="cqt-hint">Trong Item: Enter áp target, ${OPTION_KEY}Enter áp nhóm. Shift/Cmd+click để chọn nhóm trên canvas.</p>
@@ -12135,6 +12532,7 @@ function togglePanel() {
  if (stealthUI) {
   stealthUI = false;
   root.classList.remove("cqt-stealth-ui");
+  syncDockSettingsUI();
   dockTick(true);
   panelApi?.setPinned(true);
   setStatus("Đã hiện lại giao diện Tool & mở Panel.", "info");
@@ -12147,6 +12545,7 @@ function togglePanel() {
 function toggleStealthUI() {
  stealthUI = !stealthUI;
  root.classList.toggle("cqt-stealth-ui", stealthUI);
+ syncDockSettingsUI();
  if (stealthUI) {
   pointerInTool = false;
   panelApi?.setPinned(false);
@@ -12252,13 +12651,26 @@ function createUI() {
 
 function bindPanel(wrapper) {
  const pinBtn = wrapper.querySelector("#cqt-btn-pin");
- const launcher = wrapper.querySelector("#cvat-quicktool-handle");
+ launcher = wrapper.querySelector("#cvat-quicktool-handle");
+ if (toolbar) {
+  toolbar.appendChild(launcher);
+  projectionButton = document.createElement('button');
+  projectionButton.type = 'button';
+  projectionButton.className = 'cqt-player-projection';
+  projectionButton.addEventListener('click', () => toggleDockViews());
+  toolbar.appendChild(projectionButton);
+ }
  const panel = wrapper.querySelector("#cvat-quicktool-panel");
  const setPinned = (on) => {
   if (!on && panel.contains(document.activeElement)) launcher.focus({ preventScroll: true });
   launcher.setAttribute('aria-expanded', String(on));
   pinBtn.setAttribute('aria-pressed', String(on));
   panel.inert = !on;
+  if (!on && fc.toolsOpen) {
+   fc.toolsOpen = false;
+   root.classList.remove('cqt-fc-tools-open');
+   $('cqt-fc-tools')?.setAttribute('aria-pressed', 'false');
+  }
   wrapper.classList.toggle("pinned", on);
   dockLayout();
   pinBtn.classList.toggle("active", on);
@@ -12285,7 +12697,7 @@ function bindPanel(wrapper) {
  }
  pinBtn.addEventListener("click", () => setPinned(!wrapper.classList.contains("pinned")));
  wrapper.querySelector("#cqt-btn-close").addEventListener("click", () => setPinned(false));
- launcher.addEventListener("click", () => setPinned(!wrapper.classList.contains("pinned")));
+ launcher.addEventListener("click", togglePanel);
 
  wrapper.querySelectorAll(".cqt-tab").forEach((tab) => {
   tab.addEventListener("click", () => {
@@ -12526,7 +12938,10 @@ function bindActions(wrapper) {
 
  // Tab 4: QA & Snapshot
  wrapper.querySelectorAll('[id^="cqt-qa-"]').forEach((el) => {
-  if (el.tagName === "INPUT") el.addEventListener("change", () => readQAOptionsFromUI());
+  if (el.tagName === "INPUT") el.addEventListener("change", () => {
+   readQAOptionsFromUI();
+   invalidateQC();
+  });
  });
  const qaDetails = wrapper.querySelector("#cqt-qa-details");
  if (qaDetails) {
@@ -12534,6 +12949,7 @@ function bindActions(wrapper) {
    lsSet(LS.settings, { ...getSettings(), qaConfigOpen: qaDetails.open });
   });
  }
+ on("cqt-btn-qc-workspace", () => openQCWorkspace());
  on("cqt-btn-qa-scan", scanQA);
  on("cqt-btn-qa-autofix", previewAutoFix);
  on("cqt-btn-qa-export", exportQA);
@@ -12599,6 +13015,8 @@ function syncFrameLabel() {
 
 let storeSyncTimer = null;
 const sync = guarded(async () => {
+ if (xf.active && getFrame() !== xf.frame) cancelTransform();
+ if (lastQA && !qaInFlight && !qcDirty && lastQA.history !== qaHistoryStamp()) invalidateQC();
  syncFrameLabel();
  syncActiveObjectQuiet();
  await dockTick();
@@ -12618,9 +13036,12 @@ function dispose() {
   clearInterval(interval);
   clearTimeout(toastTimer);
   cancelAnimationFrame(fc.raf);
+  cancelAnimationFrame(dockRaf);
   fc.observer?.disconnect();
   fc.resizeObserver?.disconnect();
   dock.observer?.disconnect();
+  if (toolbar?.contains(launcher)) launcher.remove();
+  projectionButton?.remove();
   root.remove();
   lastViews = null;
  }
