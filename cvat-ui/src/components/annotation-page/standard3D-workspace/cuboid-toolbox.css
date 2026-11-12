@@ -101,3 +101,7 @@
 #cvat-cuboid-toolbox .cqt-disclosure .cqt-keymap-grid {
     grid-template-columns: minmax(80px, max-content) minmax(0, 1fr);
 }
+
+#cvat-cuboid-toolbox #cqt-item-panel .cqt-item-actions {
+    flex-wrap: wrap;
+}
