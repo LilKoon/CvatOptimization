@@ -136,6 +136,7 @@ const LS = {
  healthPos: 'cqt_health_viewport_pos_v1',
  legacyHealthPos: 'cqt_health_pos_v1',
  itemPos: 'cqt_item_viewport_pos_v1',
+ toolboxPos: 'cqt_toolbox_viewport_pos_v1',
 };
 
 // Ngưỡng LWH tiêu chuẩn theo class (m)
@@ -1181,17 +1182,8 @@ function allowAutoFrames(what) {
 }
 
 function resolveTargetId() {
- const act = activeId();
- if (!targetLocked && !pointerInTool && getSettings().autoSyncObject && act !== null) {
-  if (intVal('cqt-target-id') !== act) {
-   setField('cqt-target-id', act);
-   lastSyncedObjId = act;
-  }
-  return act;
- }
  const typed = intVal('cqt-target-id');
- if (Number.isInteger(typed)) return typed;
- return act;
+ return Number.isInteger(typed) ? typed : activeId();
 }
 
 function requireTarget() {
@@ -2582,31 +2574,13 @@ async function fetchLWHQuiet(id, frame) {
 }
 
 let syncBusy = false;
-// Chống "lướt chuột qua sidebar CVAT" làm nhảy Target: chuột trong Tool => không đổi Target,
-// và object mới phải được kích hoạt ổn định >= 250ms mới nhận
 let pointerInTool = false;
-let pendingObj = { id: null, t: 0 };
-const OBJ_STABLE_MS = 250;
 
 async function syncActiveObjectQuiet() {
  if (syncBusy || isToolBusy() || !$('cvat-quicktool-wrapper')) return;
  const frame = getFrame();
- const actId = activeId();
- const autoSync = getSettings().autoSyncObject;
-
- let objChanged = autoSync && !targetLocked && actId !== null && actId !== lastSyncedObjId;
- if (objChanged) {
-  const now = Date.now();
-  if (pointerInTool) {
-   objChanged = false;
-  } else if (pendingObj.id !== actId) {
-   pendingObj = { id: actId, t: now };
-   setTimeout(syncActiveObjectQuiet, OBJ_STABLE_MS + 20);
-   objChanged = false;
-  } else if (now - pendingObj.t < OBJ_STABLE_MS) {
-   objChanged = false;
-  }
- }
+ const actId = resolveTargetId();
+ const objChanged = getSettings().autoSyncObject && !targetLocked && Number.isInteger(actId) && actId !== lastSyncedObjId;
  const frameChanged = Number.isInteger(frame) && frame !== lastSyncedFrame;
  if (!objChanged && !frameChanged) return;
 
@@ -7032,6 +7006,27 @@ function installGlobalHandlers() {
    if (xf.active || (Date.now() < swallowClicksUntil && pointerOverCanvas(e.clientX, e.clientY))) swallow(e);
   }, true);
  }
+ // CVAT activates sidebar rows on hover. Only deliberate clicks change the Toolbox target.
+ listen(document, 'click', guarded(async (e) => {
+  if (e.button !== 0 || e.shiftKey || e.metaKey || e.altKey || e.ctrlKey || targetLocked ||
+      !getSettings().autoSyncObject) return;
+  const card = e.target.closest?.('.cvat-objects-sidebar-state-item');
+  const frame = getFrame();
+  const previous = intVal('cqt-target-id');
+  let id;
+  if (card && !e.target.closest('a, button, input, label, select, textarea, [role="button"]')) {
+   id = Number(card.id.match(/^cvat-objects-sidebar-state-item-(\d+)$/)?.[1]);
+  } else if (e.target === getPerspectiveView()?.renderer?.domElement) {
+   const mode = annotationState()?.canvas?.instance?.mode?.();
+   if (mode && mode !== 'idle') return;
+   id = await findCuboidUnderPointer(e.clientX, e.clientY);
+   if (frame !== getFrame() || !Object.is(previous, intVal('cqt-target-id')) || targetLocked) return;
+  }
+  if (!Number.isInteger(id)) return;
+  setField('cqt-target-id', id);
+  await syncActiveObjectQuiet();
+  await dockTick(true);
+ }), true);
  // Shift / Cmd + Click trên canvas hoặc danh sách object => thêm/bớt khỏi nhóm chọn
  listen(document, 'click', async (e) => {
   if (!(e.shiftKey || e.metaKey) || e.target.closest?.('#cvat-quicktool-wrapper, #cqt-modal, #cqt-fc-window, .cqt-dock-view, #cqt-item-panel')) return;
@@ -7066,7 +7061,7 @@ const FC_VIEWS = ['top', 'side', 'front', '3d'];
 const FC_DEFAULTS = {
  maximized: true, x: 60, y: 50, w: 1280, h: 760,
  rowH: 155, zoom: 1, filter: 'all', fillMode: 'lwh', anchor: 'center',
- slice: 'tight', show3d: true, scene3d: true, zoom3d: 1,
+ slice: 'tight', show3d: true, scene3d: true, fullSceneDetail: true, zoom3d: 1,
  live3d: false, liveSplitMode: 'bottom', liveSplitY: 0, liveSplitX: 0,
  camAz: -0.68, camEl: 0.46, camPan: [0, 0, 0], nav3dMode: 'orbit',
 };
@@ -7110,6 +7105,10 @@ const ICON_MOON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" s
 
 const pointCropCache = new Map(); // `${jobId}:${objectId}:${frame}` -> Float32Array [x, y, z, ...] (toạ độ thế giới)
 const sceneCropCache = new Map(); // `${jobId}:${frame}` -> Float32Array [x, y, z, ...] (đám mây điểm toàn cảnh 3D đã lọc LOD)
+const fullSceneCache = new Map();
+const FULL_SCENE_CACHE_LIMIT = 64 * 1024 * 1024;
+let fullSceneBytes = 0;
+let fullSceneRaster;
 const frameBoxesCache = new Map(); // `${jobId}:${frame}` -> Array<{ id, label, points }> (mọi cuboid trong frame)
 
 const fc = {
@@ -7431,12 +7430,35 @@ async function captureFrameBoxes(frame) {
  return boxes;
 }
 
+function discardFullScene(key) {
+ const points = fullSceneCache.get(key);
+ if (!points) return;
+ fullSceneBytes -= points.byteLength;
+ fullSceneCache.delete(key);
+ if (fullSceneRaster?.source === points) fullSceneRaster.source = null;
+}
+
+function rememberFullScene(key, positions) {
+ if (!fc.cfg.fullSceneDetail || !positions.length) return;
+ if (fullSceneCache.get(key) === positions) {
+  fullSceneCache.delete(key);
+  fullSceneCache.set(key, positions);
+  return;
+ }
+ discardFullScene(key);
+ while (fullSceneCache.size && fullSceneBytes + positions.byteLength > FULL_SCENE_CACHE_LIMIT) {
+  discardFullScene(fullSceneCache.keys().next().value);
+ }
+ fullSceneCache.set(key, positions);
+ fullSceneBytes += positions.byteLength;
+}
+
 function fcCacheFrameCloud(id, frame, basePoints, positions) {
  const crop = cropPointsAroundBox(basePoints, positions);
  pointCropCache.set(cropKey(id, frame), crop);
- if (!sceneCropCache.has(sceneKey(frame))) {
-  sceneCropCache.set(sceneKey(frame), cropScenePoints(basePoints, positions));
- }
+ const key = sceneKey(frame);
+ if (!sceneCropCache.has(key)) sceneCropCache.set(key, cropScenePoints(basePoints, positions));
+ rememberFullScene(key, positions);
  return crop;
 }
 
@@ -7652,6 +7674,7 @@ async function fcHarvest(force) {
   for (const r of fc.allRows) {
    pointCropCache.delete(cropKey(id, r.frame));
    sceneCropCache.delete(sceneKey(r.frame));
+   discardFullScene(sceneKey(r.frame));
    frameBoxesCache.delete(sceneKey(r.frame));
    r.ground = undefined;
   }
@@ -7659,7 +7682,8 @@ async function fcHarvest(force) {
  const original = getFrame();
  const curRow = fc.allRows.find((r) => r.frame === original && !r.outside);
  const curPos = getPointCloudPositions();
- if (curRow && curPos) {
+ if (curRow && curPos && !annotationState()?.player?.frame?.fetching &&
+     (dock.cloudFrame === original || curPos !== dock.cloudRef)) {
   fcCacheFrameCloud(id, curRow.frame, curRow.base, curPos);
   curRow.ground = undefined;
  }
@@ -8024,11 +8048,91 @@ function fcStrokePoly(ctx, pts, color, width, dash) {
  ctx.setLineDash([]);
 }
 
+// Rasterize original points directly to screen pixels. The sampled scene remains the drag preview.
+function fcDrawFullScene(ctx, g, pal, points, anchor, box, camera, plane) {
+ const width = Math.ceil(g.cw), height = Math.ceil(g.ch);
+ if (!fullSceneRaster) {
+  const canvas = document.createElement('canvas');
+  fullSceneRaster = { canvas, ctx: canvas.getContext('2d'), width: 0, height: 0 };
+ }
+ const layer = fullSceneRaster;
+ const colors = [pal.ptGround, pal.ptAround, pal.ptElevated, pal.ptInside];
+ const signature = [width, height, g.cx, g.cy, g.k, ...anchor.slice(0, 6), ...box.slice(0, 9),
+  camera.az, camera.el, camera.panU, camera.panV, camera.panW,
+  fc.cfg.scene3d, plane?.a, plane?.b, plane?.c, ...colors].join('|');
+
+ if (layer.source !== points || layer.signature !== signature) {
+  if (layer.width !== width || layer.height !== height) {
+   layer.canvas.width = layer.width = width;
+   layer.canvas.height = layer.height = height;
+   layer.image = layer.ctx.createImageData(width, height);
+   layer.pixels = new Uint32Array(layer.image.data.buffer);
+  }
+  const paletteKey = colors.join('|');
+  if (layer.paletteKey !== paletteKey) {
+   layer.ctx.clearRect(0, 0, 4, 1);
+   colors.forEach((color, index) => {
+    layer.ctx.fillStyle = color;
+    layer.ctx.fillRect(index, 0, 1, 1);
+   });
+   layer.colors = new Uint32Array(layer.ctx.getImageData(0, 0, 4, 1).data.buffer);
+   layer.paletteKey = paletteKey;
+  }
+  const [road, body, high, inside] = layer.colors;
+  const pixels = layer.pixels;
+  pixels.fill(0);
+  const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
+  const centerX = anchor[0] + camera.panU * ac - camera.panV * as;
+  const centerY = anchor[1] + camera.panU * as + camera.panV * ac;
+  const centerZ = anchor[2] + camera.panW;
+  const az = camera.az + anchor[5];
+  const ca = Math.cos(az), sa = Math.sin(az), ce = Math.cos(camera.el), se = Math.sin(camera.el);
+  const distance = fc.cfg.scene3d ? 28 : 16;
+  const [a, b, c] = plane ? [plane.a, plane.b, plane.c] : [0, 0, bottomZ(anchor)];
+  const [r0, r1, r2] = rotationMatrix(box[3], box[4], box[5]);
+  const hl = Math.abs(box[6]) / 2, hw = Math.abs(box[7]) / 2, hh = Math.abs(box[8]) / 2;
+  const radius = Math.hypot(hl, hw, hh);
+
+  for (let i = 0; i + 2 < points.length; i += 3) {
+   const x = points[i], y = points[i + 1], z = points[i + 2];
+   const dx = x - centerX, dy = y - centerY, dz = z - centerZ;
+   const forward = dx * ca + dy * sa;
+   const depth = -forward * ce - dz * se;
+   if (depth <= -distance) continue;
+   const scale = g.k * distance / Math.max(3.5, distance + depth);
+   const sx = Math.floor(g.cx + (-dx * sa + dy * ca) * scale);
+   const sy = Math.floor(g.cy - (-forward * se + dz * ce) * scale);
+   if (!(sx >= 0 && sx < width && sy >= 0 && sy < height)) continue;
+   const pixel = sy * width + sx;
+   if (pixels[pixel] === inside) continue;
+
+   const bx = x - box[0], by = y - box[1], bz = z - box[2];
+   if (Math.abs(bx) <= radius && Math.abs(by) <= radius && Math.abs(bz) <= radius &&
+       Math.abs(r0[0] * bx + r1[0] * by + r2[0] * bz) <= hl &&
+       Math.abs(r0[1] * bx + r1[1] * by + r2[1] * bz) <= hw &&
+       Math.abs(r0[2] * bx + r1[2] * by + r2[2] * bz) <= hh) {
+    pixels[pixel] = inside;
+   } else {
+    const heightAboveGround = z - (a * x + b * y + c);
+    pixels[pixel] = heightAboveGround < 0.16 ? road : heightAboveGround < 1.4 ? body : high;
+   }
+  }
+  layer.ctx.putImageData(layer.image, 0, 0);
+  layer.source = points;
+  layer.signature = signature;
+ }
+ const smoothing = ctx.imageSmoothingEnabled;
+ ctx.imageSmoothingEnabled = false;
+ ctx.drawImage(layer.canvas, 0, 0);
+ ctx.imageSmoothingEnabled = smoothing;
+}
+
 function fcRender3D(row, canvas, g, pal) {
  const ctx = canvas.getContext('2d');
  const anchor = row.base;
  const p = fcPoints(row);
- const { az, el, panU, panV, panW, focusId } = fcRowCam(row);
+ const camera = fcRowCam(row);
+ const { az, el, panU, panV, panW, focusId } = camera;
  const hasPan = Math.hypot(panU, panV, panW) > 0.05;
  const isScene3D = !!(fc.cfg.scene3d || fc.cfg.slice === 'scene');
  const toScreen3D = (x, y, z) => {
@@ -8063,9 +8167,13 @@ function fcRender3D(row, canvas, g, pal) {
  const sceneCloud = isScene3D ? sceneCropCache.get(sceneKey(row.frame)) : null;
  const plane = fcGroundPlane(row);
  const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
+ const fullScene = isScene3D && fc.cfg.fullSceneDetail ? fullSceneCache.get(sceneKey(row.frame)) : null;
+ const useFullScene = fullScene && !fc.drag?.moved;
+ canvas.dataset.cloudDensity = useFullScene ? 'full' : isScene3D ? 'preview' : 'near';
+ if (useFullScene) fcDrawFullScene(ctx, g, pal, fullScene, anchor, p, camera, plane);
 
  // 1. Đám mây điểm toàn cảnh CVAT (phân tầng Z: mặt đường, thân xe xung quanh, cây cối/cột đèn trên cao)
- if (sceneCloud) {
+ if (!useFullScene && sceneCloud) {
   const rTight = cloud ? 0.5 * Math.hypot(row.base[6], row.base[7]) + 2.8 : 0;
   const rTight2 = rTight * rTight;
   const scGround = new Path2D(), scLow = new Path2D(), scHigh = new Path2D();
@@ -8098,7 +8206,7 @@ function fcRender3D(row, canvas, g, pal) {
  }
 
  // 2. Point cloud chi tiết quanh & trong xe mục tiêu (điểm trong xe giữ màu ngọc dạ quang #34d399)
- if (cloud) {
+ if (!useFullScene && cloud) {
   const R = rotationMatrix(p[3], p[4], p[5]);
   const hl = Math.abs(p[6]) / 2, hw = Math.abs(p[7]) / 2, hh = Math.abs(p[8]) / 2;
   const inside = new Path2D(), aroundGround = new Path2D(), aroundBody = new Path2D(), aroundHigh = new Path2D();
@@ -8353,9 +8461,9 @@ function fcRender3D(row, canvas, g, pal) {
  const z3dVal = (row.zoom3d ?? fc.cfg.zoom3d ?? 1).toFixed(1);
  const panTag = hasPan ? (focusId ? ` · Tâm #${focusId}` : ` · Lệch (${panU.toFixed(1)},${panV.toFixed(1)}m)`) : '';
  ctx.fillText(`Góc ${(az * DEG).toFixed(0)}°/${(el * DEG).toFixed(0)}° · Zoom ${z3dVal}×${panTag}`, 36, g.ch - 6);
- if (!cloud && !sceneCloud) {
+ if ((!cloud && !sceneCloud && !useFullScene) || (isScene3D && fc.cfg.fullSceneDetail && !fullScene)) {
   ctx.textAlign = 'right';
-  ctx.fillText('chưa có cloud', g.cw - 6, g.ch - 6);
+  ctx.fillText(isScene3D && fc.cfg.fullSceneDetail ? 'Bấm Tới để nạp đủ điểm' : 'chưa có cloud', g.cw - 6, 30);
   ctx.textAlign = 'left';
  }
 }
@@ -8847,6 +8955,12 @@ function fcUpdateBars() {
  if (btn3d) btn3d.classList.toggle('active', !!fc.cfg.show3d);
  const btnScene3d = $('cqt-fc-scene3d');
  if (btnScene3d) btnScene3d.classList.toggle('active', !!(fc.cfg.scene3d || fc.cfg.slice === 'scene'));
+ const fullDetail = $('cqt-fc-full-detail');
+ if (fullDetail) {
+  fullDetail.disabled = !(fc.cfg.show3d && (fc.cfg.scene3d || fc.cfg.slice === 'scene'));
+  fullDetail.setAttribute('aria-pressed', String(fc.cfg.fullSceneDetail));
+  fullDetail.classList.toggle('active', fc.cfg.fullSceneDetail);
+ }
  const btnLive3d = $('cqt-fc-live3d');
  if (btnLive3d) btnLive3d.classList.toggle('active', !!fc.cfg.live3d);
  const liveSplitGroup = $('cqt-fc-live-layouts');
@@ -9446,7 +9560,8 @@ async function fcOnMouseUp(e) {
  if (d.type === 'orbit3d' || d.type === 'pan3d') {
   if (!d.moved && e) fcSelectClick(d.row, e);
   else if (!d.singleRow) saveFcSettings({ camAz: fc.cfg.camAz, camEl: fc.cfg.camEl, camPan: fc.cfg.camPan });
-  fcSchedule([d.row]);
+  if (d.singleRow) fcSchedule([d.row]);
+  else fcRerenderVisible();
   return;
  }
  if (d.type === 'pan2d') {
@@ -9482,6 +9597,8 @@ function fcCancelDrag() {
  if (d?.type === 'edit') {
   for (const r of d.targets) r.draft = null;
   fcSchedule(d.targets);
+ } else if (d?.type === 'orbit3d' || d?.type === 'pan3d') {
+  fcRerenderVisible();
  }
  fcClearFillMarks();
 }
@@ -9553,6 +9670,7 @@ const FC_HTML = `
   </label>
   <button id="cqt-fc-toggle-3d" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Hiện / Ẩn cột tương tác 3D (xoay quanh xe &amp; kéo thả hộp 3D)">Cột 3D</button>
   <button id="cqt-fc-scene3d" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Hiển thị toàn bộ đám mây điểm 3D quanh xe + mọi cuboid khác trong frame trên cột 3D (Ctrl/Alt + Lăn chuột trên ô 3D để zoom riêng)">${ICONS.globe}<span>Toàn cảnh 3D</span></button>
+  <button id="cqt-fc-full-detail" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" type="button" aria-pressed="true" title="Hiện tất cả điểm của frame đã nạp. Bấm Tới để nạp đủ điểm cho frame đó.">Đầy đủ điểm</button>
   <button id="cqt-fc-live3d" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Chia đôi màn hình (Split View): mở song song khung 3D WebGL thật của CVAT và tự đồng bộ frame + căn tâm camera 3D khi chọn hàng">${ICONS.split}<span>3D CVAT Live</span></button>
   <div id="cqt-fc-live-layouts" class="cqt-fc-seg" style="display:none;" title="Chọn bố cục chia màn hình 3D CVAT Live (hoặc kéo thanh tiêu đề Full Control để chỉnh tỷ lệ)">
    <button data-split-mode="bottom" title="Chia Trên / Dưới: Phía trên hiện 3D CVAT + Ảnh Camera (tự căn tâm camera 3D), phía dưới là Full Control">${ICONS.panelBottom}<span>Dưới</span></button>
@@ -9839,6 +9957,21 @@ function fcBindWindow(el) {
     : 'Đã chuyển cột 3D về chế độ chỉ hiển thị quanh Box.',
    'info'
   );
+ });
+ on('cqt-fc-full-detail', () => {
+  saveFcSettings({ fullSceneDetail: !fc.cfg.fullSceneDetail });
+  if (fc.cfg.fullSceneDetail) {
+   const frame = getFrame();
+   const positions = getPointCloudPositions();
+   if (positions && Number.isInteger(frame) && !annotationState()?.player?.frame?.fetching &&
+       (dock.cloudFrame === frame || positions !== dock.cloudRef)) {
+    rememberFullScene(sceneKey(frame), positions);
+   }
+  } else {
+   for (const key of fullSceneCache.keys()) discardFullScene(key);
+  }
+  fcUpdateBars();
+  fcRerenderVisible();
  });
  on('cqt-fc-live3d', () => {
   const next = !fc.cfg.live3d;
@@ -10327,7 +10460,28 @@ function placeFloatingHud(el, x, y) {
  return { x: left, y: top };
 }
 
-function bindHudGrip(hud, key) {
+function placeToolboxPanel(el, x, y) {
+ const left = Math.round(clamp(x, 8, Math.max(8, window.innerWidth - el.offsetWidth - 8)));
+ const top = Math.round(clamp(y, 8, Math.max(8, window.innerHeight - 180)));
+ el.style.left = `${left}px`;
+ el.style.setProperty('--cqt-sidebar-top', `${top}px`);
+ return { x: left, y: top };
+}
+
+function placeHealthHud(el, x, y) {
+ const position = placeFloatingHud(el, x, y);
+ const header = document.querySelector('.cvat-header')?.getBoundingClientRect();
+ if (header && !el.classList.contains('open') && y >= header.top && y < header.bottom) {
+  const top = header.bottom - el.offsetHeight - 2;
+  if (top >= header.top + 2) {
+   position.y = Math.round(clamp(y, header.top + 2, top));
+   el.style.top = `${position.y}px`;
+  }
+ }
+ return position;
+}
+
+function bindHudGrip(hud, key, place = placeFloatingHud) {
  const grip = hud.el.querySelector('.cqt-hud-grip');
  let drag = null;
  grip.addEventListener('pointerdown', (event) => {
@@ -10349,7 +10503,7 @@ function bindHudGrip(hud, key) {
   if (!drag || event.pointerId !== drag.pointerId) return;
   if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 3) return;
   drag.moved = true;
-  hud.position = placeFloatingHud(hud.el, event.clientX - drag.offsetX, event.clientY - drag.offsetY);
+  hud.position = place(hud.el, event.clientX - drag.offsetX, event.clientY - drag.offsetY);
  });
  grip.addEventListener('pointerup', (event) => {
   if (!drag || event.pointerId !== drag.pointerId) return;
@@ -10370,7 +10524,7 @@ function bindHudGrip(hud, key) {
   swallow(event);
   const { left, top } = hud.el.getBoundingClientRect();
   const step = event.shiftKey ? 32 : 8;
-  hud.position = placeFloatingHud(hud.el, left + direction[0] * step, top + direction[1] * step);
+  hud.position = place(hud.el, left + direction[0] * step, top + direction[1] * step);
   lsSet(key, hud.position);
  });
 }
@@ -10397,19 +10551,14 @@ function dockLayout() {
   }
  }
  const perspective = onJob ? cvatViewRect('perspective') : null;
- if (perspective) {
-  $('cvat-quicktool-wrapper')?.style.setProperty('--cqt-sidebar-top', `${fc.toolsOpen ? 8 : Math.max(0, perspective.r.top)}px`);
- }
+ panelApi?.layout(perspective?.r);
  if (item.el) {
   const host = hasTarget && itemOn() ? perspective : null;
   if (!host) {
    item.el.style.display = 'none';
   } else {
    item.el.style.display = 'flex';
-   const panel = $('cvat-quicktool-panel');
-   const panelLeft = panel && !panel.inert ? panel.getBoundingClientRect().left : window.innerWidth;
-   const right = Math.min(host.r.right, panelLeft);
-   const left = Math.max(host.r.left + 8, right - item.el.offsetWidth - 8);
+   const left = Math.max(host.r.left + 8, host.r.right - item.el.offsetWidth - 8);
    placeFloatingHud(item.el, item.position?.x ?? left, item.position?.y ?? host.r.top + 8);
   }
  }
@@ -10492,7 +10641,6 @@ function dockCrop(id, frame, points, positions) {
   const r = fc.rows.find((row) => row.frame === frame);
   if (r) {
    r.cloud = crop;
-   r.sceneCloud = sceneCropCache.get(sceneKey(frame)) || null;
    fcRenderRow(r);
    fcUpdateRowMeta(r);
    fcUpdateBars();
@@ -10852,7 +11000,7 @@ function healthLayout(onJob = !!getJob() && Number.isInteger(resolveTargetId()))
  }
  health.el.style.display = 'flex';
  const { left, top } = host.r;
- placeFloatingHud(
+ placeHealthHud(
   health.el,
   health.position?.x ?? left + (health.legacyOffset?.dx ?? 8),
   health.position?.y ?? top + (health.legacyOffset?.dy ?? 8),
@@ -11325,7 +11473,7 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
  health.el = el;
  bindHealthPopEvents(el);
 
- bindHudGrip(health, LS.healthPos);
+ bindHudGrip(health, LS.healthPos, placeHealthHud);
  el.querySelector('[data-sec="anchor"]').addEventListener('toggle', () => healthLayout());
 
  el.addEventListener('click', guarded(async (e) => {
@@ -11969,6 +12117,7 @@ const PANEL_HTML = `
 <section id="cvat-quicktool-panel" aria-label="Cuboid Toolbox" inert>
 <div id="cvat-quicktool-header">
 <div class="title">
+<button type="button" class="cqt-hud-grip cqt-toolbox-grip" aria-label="Di chuyển Toolbox" title="Kéo để di chuyển Toolbox · Nhấp đúp để về mép trái">${ICONS.grip}</button>
 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
 <span>Cuboid Toolbox</span>
 </div>
@@ -12481,7 +12630,7 @@ ${lidarGroundFields()}
 <div class="cqt-card">
 <span class="cqt-h">Tuỳ chọn Tính năng (On / Off)</span>
 <label class="cqt-check" title="Bật giao diện Sáng (Light Mode) với viền và chữ tương phản cao"><input type="checkbox" id="cqt-set-light-theme" /> Giao diện Sáng (Light Mode)</label>
-<label class="cqt-check" title="Khi chọn cuboid trên canvas hoặc đổi frame, tự nạp ID, LWH, góc xoay và sub-label vào panel"><input type="checkbox" id="cqt-set-auto-sync" /> Tự đồng bộ Object khi chọn trên Canvas</label>
+<label class="cqt-check" title="Tự nạp ID, LWH và sub-label khi bấm chọn cuboid trên canvas hoặc trong danh sách Objects"><input type="checkbox" id="cqt-set-auto-sync" /> Đồng bộ Target khi bấm chọn</label>
 <label class="cqt-check" title="Hiện thanh nhảy nhanh qua các Keyframe của riêng Target trên thanh Global Bar"><input type="checkbox" id="cqt-set-kf-stepper" /> Hiện thanh điều hướng Keyframe của Target</label>
 <label class="cqt-check" title="Cho phép cố định Mặt trước/sau/trái/phải/cảm biến khi đổi LWH"><input type="checkbox" id="cqt-set-anchor-resize" /> Cho phép chọn mặt neo (Anchor Face) khi đổi LWH</label>
 <label class="cqt-check" title="Hiện bảng nhích toạ độ cục bộ (Tiến/Lùi/Trái/Phải) và nút Nội suy tuyến tính dải"><input type="checkbox" id="cqt-set-micro-nudge" /> Bật cụm Nhích vi chỉnh &amp; Nội suy tuyến tính</label>
@@ -12695,6 +12844,18 @@ function bindPanel(wrapper) {
  }
  const panel = wrapper.querySelector("#cvat-quicktool-panel");
  const rail = wrapper.querySelector('#cqt-sidebar-rail');
+ const placement = { el: wrapper, position: lsGet(LS.toolboxPos, null) };
+ const saved = placement.position;
+ if (!Number.isFinite(saved?.x) || !Number.isFinite(saved?.y)) placement.position = null;
+ bindHudGrip(placement, LS.toolboxPos, (el, x, y) => {
+  root.classList.remove('cqt-fc-tools-docked');
+  return placeToolboxPanel(el, x, y);
+ });
+ wrapper.querySelector('.cqt-toolbox-grip').addEventListener('dblclick', () => {
+  placement.position = null;
+  lsSet(LS.toolboxPos, null);
+  dockLayout();
+ });
  let collapseTimer;
  const getState = () => wrapper.dataset.sidebarState;
  const setState = (state) => {
@@ -12742,6 +12903,12 @@ function bindPanel(wrapper) {
  panelApi = {
   getState,
   setState,
+  layout(rect) {
+   const x = fc.toolsOpen ? 8 : (rect?.left ?? 0) + 8;
+   const y = fc.toolsOpen ? 8 : (rect?.top ?? 98) + 8;
+   root.classList.toggle('cqt-fc-tools-docked', fc.toolsOpen && !placement.position);
+   placeToolboxPanel(wrapper, placement.position?.x ?? x, placement.position?.y ?? y);
+  },
   toggle() {
    return getState() === 'peek' || getState() === 'pinned' ? setState('closed') : peek();
   },
@@ -12753,9 +12920,6 @@ function bindPanel(wrapper) {
  wrapper.addEventListener('pointerleave', () => {
   pointerInTool = false;
   if (getState() === 'peek') queueCollapse(260);
-  const act = activeId();
-  if (act !== null) lastSyncedObjId = act;
-  pendingObj = { id: null, t: 0 };
  });
  panel.addEventListener('focusout', () => {
   if (getState() === 'peek' && !pointerInTool) queueCollapse(260);
