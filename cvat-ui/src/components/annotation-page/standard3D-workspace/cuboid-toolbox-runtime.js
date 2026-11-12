@@ -5440,6 +5440,7 @@ function closeQCWorkspace(restoreFocus = true) {
 function openQCWorkspace() {
  if ($('cqt-qc-workspace')) return;
  qcFocus = document.activeElement;
+ const toolboxWasPinned = panelApi?.getState() === 'pinned';
  qcPage = 0;
  const options = $('cqt-qa-details');
  qcOptionsLocation = { parent: options.parentNode, next: options.nextSibling };
@@ -5450,7 +5451,10 @@ function openQCWorkspace() {
  box.innerHTML = `
   <header class="cqt-qc-head">
    <div><h2 id="cqt-qc-title">QA/QC cuboid</h2><span id="cqt-qc-summary"></span></div>
-   <button id="cqt-qc-close" class="cqt-btn cqt-btn-secondary" aria-label="Đóng QA/QC">Đóng</button>
+   <div class="cqt-row cqt-wrap">
+    <button type="button" id="cqt-qc-back" class="cqt-btn cqt-btn-secondary">Về Toolbox</button>
+    <button type="button" id="cqt-qc-close" class="cqt-btn cqt-btn-secondary" aria-label="Đóng QA/QC">Đóng</button>
+   </div>
   </header>
   <div class="cqt-qc-toolbar">
    <button id="cqt-qc-scan" class="cqt-btn cqt-btn-primary">Quét QA</button>
@@ -5480,6 +5484,16 @@ function openQCWorkspace() {
  root.appendChild(box);
  $('cqt-qc-criteria').appendChild(options);
  const bind = (id, action, event = 'click') => $(id).addEventListener(event, guarded(action));
+ bind('cqt-qc-back', () => {
+  closeQCWorkspace(false);
+  if (fc.open && !fc.toolsOpen) closeFullControl();
+  if (stealthUI) togglePanel();
+  else panelApi?.setState(toolboxWasPinned ? 'pinned' : 'peek');
+  const panel = $('cvat-quicktool-panel');
+  const focus = panel.contains(qcFocus) && qcFocus.getClientRects().length
+   ? qcFocus : panel.querySelector('.cqt-tab.active');
+  focus?.focus({ preventScroll: true });
+ });
  bind('cqt-qc-close', () => closeQCWorkspace());
  bind('cqt-qc-scan', scanQA);
  bind('cqt-qc-export', () => exportQA({ review: true }));
