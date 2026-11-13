@@ -3,7 +3,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { estimateLidarOriginGround } from './cuboid-toolbox-runtime.js';
+import * as ground from './cuboid-toolbox-runtime.js';
+
+const { estimateLidarOriginGround } = ground;
 
 function slopedCloud(origin) {
     const positions = [];
@@ -30,4 +32,22 @@ test('fits road height and slope relative to a world-coordinate LiDAR origin', (
 test('returns no plane when coverage is insufficient or the sensor origin is out of range', () => {
     assert.equal(estimateLidarOriginGround([0, 0, 0], [0, 0]), null);
     assert.equal(estimateLidarOriginGround(slopedCloud([450, -800]), [0, 0]), null);
+});
+
+test('uses the sensor XY plane through the PCD viewpoint with its own orientation', () => {
+    const origin = [3, 4, 7];
+    const halfAngle = Math.PI / 12;
+    const plane = ground.lidarPlaneFromPcdHeader(
+        `VERSION 0.7\nVIEWPOINT ${origin.join(' ')} ${Math.cos(halfAngle)} ${Math.sin(halfAngle)} 0 0\nDATA binary\n`,
+    );
+    const heightAt = (x, y) => plane.a * x + plane.b * y + plane.c;
+    assert.ok(Math.abs(heightAt(3, 4) - 7) < 1e-9);
+    assert.ok(Math.abs(heightAt(3, 5) - (7 + Math.tan(2 * halfAngle))) < 1e-9);
+});
+
+test('defaults to frame Z zero when no viewpoint is provided and rejects an invalid declared pose', () => {
+    assert.deepEqual(ground.lidarPlaneFromPcdHeader('VERSION 0.7\nDATA ascii\n'), {
+        a: 0, b: 0, c: 0, slopeDeg: 0,
+    });
+    assert.equal(ground.lidarPlaneFromPcdHeader('VIEWPOINT 0 0 0 0 0 0 0\nDATA binary\n'), null);
 });

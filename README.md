@@ -10,6 +10,8 @@ Trong **3D lớn**, nếu chỉ hiển thị một frame, các khung nhìn lấp
 
 Rê chuột hoặc bấm **Thanh công cụ** để hiện bộ lọc, các bố cục và nhóm thao tác. Thanh tự thu khi rời chuột, trả lại chỗ cho khung nhìn. Bấm biểu tượng **Ghim** để giữ thanh mở. Full Control ghi nhớ lựa chọn này khi mở lại.
 
+Trong **Fit Ground**, chọn nguồn và phạm vi rồi bấm **Đo đáy** để xem sai lệch có dấu theo từng frame, hoặc **Fit theo mốc** để chỉnh cuboid. **Gốc tọa độ LiDAR** dùng mặt phẳng XY của cảm biến từ `VIEWPOINT` trong PCD và dùng `Z = 0` của frame khi header thiếu trường này. **Cloud quanh LiDAR** lấy điểm theo bán kính quanh cảm biến. **Mặt Point Cloud** lấy điểm quanh cuboid.
+
 ## Build giao diện Toolbox
 
 Cần Git, Docker Engine hoặc Docker Desktop, và Docker Compose v2. Chạy các lệnh này trên máy chạy CVAT để Docker build image phù hợp với kiến trúc của máy.

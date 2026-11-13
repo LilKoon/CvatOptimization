@@ -1,4 +1,28 @@
 // CVAT Cuboid Toolbox, adapted from the userscript by Antigravity.
+function flatPlane(z) {
+ return { a: 0, b: 0, c: z, slopeDeg: 0 };
+}
+
+export function lidarPlaneFromPcdHeader(header) {
+ const data = /^[\t ]*DATA[\t ]+[^\r\n]+/im.exec(header);
+ if (!data) return null;
+ const viewpoint = /^[\t ]*VIEWPOINT(?:[\t ]+([^\r\n]*))?$/im.exec(header.slice(0, data.index));
+ if (!viewpoint) return flatPlane(0);
+ const values = viewpoint[1]?.trim().split(/\s+/).map(Number);
+ if (values?.length !== 7 || !values.every(Number.isFinite)) return null;
+ const [x, y, z, qw, qx, qy, qz] = values;
+ const length = Math.hypot(qw, qx, qy, qz);
+ if (!length || !Number.isFinite(length)) return null;
+ const [w, i, j, k] = [qw / length, qx / length, qy / length, qz / length];
+ const nx = 2 * (i * k + w * j);
+ const ny = 2 * (j * k - w * i);
+ const nz = 1 - 2 * (i * i + j * j);
+ // Ground fitting moves the box along scene Z, so the plane must be expressible as z(x, y).
+ if (nz <= 1e-6) return null;
+ const a = -nx / nz, b = -ny / nz;
+ return { a, b, c: z - a * x - b * y, slopeDeg: Math.atan(Math.hypot(a, b)) * 180 / Math.PI };
+}
+
 function fitPlaneLSQ(pts) {
  const n = pts.length;
  if (n < 3) return null;
@@ -82,7 +106,7 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '4.8.3';
+const VERSION = '4.8.4';
 const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
@@ -458,10 +482,6 @@ function fmtLWH(l, w, h) {
 // =========================================================================
 // Mặt phẳng đất z = a·x + b·y + c (mặt phẳng ngang: a = b = 0)
 // =========================================================================
-function flatPlane(z) {
- return { a: 0, b: 0, c: z, slopeDeg: 0 };
-}
-
 function planeZ(plane, x, y) {
  return plane.a * x + plane.b * y + plane.c;
 }
@@ -1731,7 +1751,7 @@ function setReferenceBoxIds(ids) {
  setField('cqt-ground-ref-ids', formatted);
  setField('cqt-fc-ground-anchor-ids', formatted);
  for (const prefix of ['cqt-ground-', 'cqt-fc-ground-']) {
-  if (val(prefix + 'kind') === 'anchor-range') renderGroundMissing($(prefix + 'result'), new Set(), []);
+  if (val(prefix + 'kind') === 'anchor-range') renderGroundResult($(prefix + 'result'), new Set());
  }
  renderAnchorChips();
  invalidateHealthCache();
@@ -1791,17 +1811,25 @@ function clearAllAnchors() {
  );
 }
 
-function renderGroundMissing(box, missing, refIds) {
+function renderGroundResult(box, missing, source = '', measurement = null) {
  if (!box) return;
- box.hidden = !missing.size;
+ box.hidden = !missing.size && !measurement;
  const ranges = formatFrameRanges([...missing]);
- const source = refIds.length ? `Anchor ${refIds.map((id) => '#' + id).join(' → ')}` : 'dữ liệu mặt đất';
- box.innerHTML = missing.size ? `
+ const measured = measurement ? `
+  <span>${escapeHtml(measurement.summary)}</span>
+  ${measurement.rows.length ? `<details ${measurement.rows.length <= 6 ? 'open' : ''}>
+   <summary>Theo frame và object</summary>
+   <div class="cqt-row cqt-wrap">
+    ${measurement.rows.map(({ frame, id, gap }) =>
+     `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${frame}">F${frame} · #${id} · ${fmtSigned(gap, 3)} m</button>`).join('')}
+   </div>
+  </details>` : ''}` : '';
+ box.innerHTML = measured + (missing.size ? `
   <span>Thiếu ${source} tại ${missing.size} frame. Bấm số frame để kiểm tra.</span>
   <div class="cqt-row cqt-wrap">
    ${ranges.map(({ from, text }) =>
     `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${from}">${text}</button>`).join('')}
-  </div>` : '';
+  </div>` : '');
 }
 
 function bindGroundMissing(box, fullControl = false) {
@@ -2005,19 +2033,37 @@ function lidarGroundPlane(positions, options) {
  return plane ? { ...plane, origin } : null;
 }
 
+async function lidarOriginPlaneAtFrame(job, frame) {
+ if (typeof job.frames?.get !== 'function') return flatPlane(0);
+ try {
+  const frameData = await job.frames.get(frame);
+  if (frameData.deleted) return null;
+  const { imageData } = await frameData.data();
+  if (!(imageData instanceof Blob)) return null;
+  return lidarPlaneFromPcdHeader(await imageData.slice(0, 65536).text());
+ } catch (error) {
+  console.warn(LOG, `Không đọc được gốc LiDAR của frame ${frame}:`, error);
+  return null;
+ }
+}
+
 const GROUND_FIT_CHOICES = {
  'cloud-frame': 'Mặt Point Cloud · frame',
  'cloud-range': 'Mặt Point Cloud · dải',
- 'lidar-frame': 'Gốc LiDAR · frame',
- 'lidar-range': 'Gốc LiDAR · dải',
+ 'lidar-origin-frame': 'Gốc tọa độ LiDAR · frame',
+ 'lidar-origin-range': 'Gốc tọa độ LiDAR · dải',
+ 'lidar-frame': 'Cloud quanh LiDAR · frame',
+ 'lidar-range': 'Cloud quanh LiDAR · dải',
  'anchor-range': 'Anchor · dải',
 };
+const usesLidarRadius = (kind) => kind === 'lidar-frame' || kind === 'lidar-range';
 const GROUND_FIT_MODES = {
  snap: 'Snap đáy (giữ nghiêng)',
  flat: 'Đặt phẳng (rx=ry=0)',
  tilt: 'Nghiêng theo dốc',
 };
 const GROUND_FIT_DIRECTIONS = { both: 'Cả hai', down: 'Chỉ hạ', up: 'Chỉ nâng' };
+const LIDAR_ORIGIN_HINT = 'Dùng mặt XY của cảm biến từ VIEWPOINT trong PCD. Nếu thiếu VIEWPOINT, dùng Z = 0 của frame.';
 const LIDAR_GROUND_FIELDS = {
  'origin-x': { label: 'X (m)', step: '0.01', placeholder: 'Tự động', setting: 'lidarOriginX' },
  'origin-y': { label: 'Y (m)', step: '0.01', placeholder: 'Tự động', setting: 'lidarOriginY' },
@@ -2062,10 +2108,12 @@ function syncGroundFitControls(fullControl) {
  const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
  const kind = val(prefix + 'kind');
  const anchor = kind === 'anchor-range';
+ renderGroundResult($(prefix + 'result'), new Set());
+ $(prefix + 'lidar-fields').hidden = !usesLidarRadius(kind);
+ $(prefix + 'origin-hint').hidden = !kind.startsWith('lidar-origin-');
  if (fullControl) {
   $(prefix + 'scope').disabled = !kind.endsWith('-range');
   $(prefix + 'anchor-field').hidden = !anchor;
-  $(prefix + 'lidar-fields').hidden = !kind.startsWith('lidar');
   setField(prefix + 'anchor-ids', getExplicitAnchorIds().join(', '));
  } else {
   $(prefix + 'anchor-hint').hidden = !anchor;
@@ -2099,18 +2147,22 @@ async function getGroundFitFrames(kind, targetId, fullControl, row) {
  return frames;
 }
 
-async function runGroundFit(kind, { fullControl = false, row = null } = {}) {
+async function runGroundFit(kind, { fullControl = false, row = null, measure = false } = {}) {
  if (groundFitting || isToolBusy() || fc.busy || fc.harvesting) return fail('Đang xử lý thao tác trước, thử lại khi hoàn tất.');
  if (!Object.hasOwn(GROUND_FIT_CHOICES, kind)) return;
  const job = getJob();
  const anchor = kind === 'anchor-range';
- const lidar = kind.startsWith('lidar') ? lidarGroundOptions() : null;
- if (kind.startsWith('lidar') && !lidar) return;
+ const lidarOrigin = kind.startsWith('lidar-origin-');
+ const needsCloud = !anchor && !lidarOrigin;
+ const lidar = usesLidarRadius(kind) ? lidarGroundOptions() : null;
+ if (usesLidarRadius(kind) && !lidar) return;
  const refIds = anchor ? getExplicitAnchorIds() : [];
  if (anchor && !refIds.length) return fail('Nhập ít nhất một Anchor ID trong phần tuỳ chỉnh.');
+ const missingSource = anchor ? `Anchor ${refIds.map((id) => '#' + id).join(' → ')}` :
+  lidarOrigin ? 'gốc tọa độ LiDAR' : 'dữ liệu mặt đất';
  const targetIds = (fullControl ? [fc.targetId].filter(Number.isInteger) : selectedOrTarget())
   .filter((id) => !refIds.includes(id));
- if (!targetIds.length) return fail('Chọn cuboid mục tiêu khác với Anchor.');
+ if (!targetIds.length) return fail(anchor ? 'Chọn cuboid mục tiêu khác với Anchor.' : 'Chọn cuboid mục tiêu.');
 
  const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
  const mode = val(prefix + 'mode') || 'snap';
@@ -2118,6 +2170,7 @@ async function runGroundFit(kind, { fullControl = false, row = null } = {}) {
  const label = GROUND_FIT_CHOICES[kind];
  const originalFrame = getFrame();
  const missing = new Set();
+ const measurements = [];
  const report = $(prefix + 'result');
  const keyframesOnly = !fullControl && kind.endsWith('-range') && val('cqt-ground-scope') === 'keyframes';
  let scanned = 0;
@@ -2131,13 +2184,13 @@ async function runGroundFit(kind, { fullControl = false, row = null } = {}) {
  try {
   const frames = await getGroundFitFrames(kind, targetIds[0], fullControl, row);
   if (!frames) return;
-  if (!frames.length) return fail('Chọn frame có cuboid cần fit.');
+  if (!frames.length) return fail('Chọn frame có cuboid cần xử lý.');
   if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) return;
-  if (!anchor && !safeData() && frames.length > 30 &&
-      !confirm(`Fit ${label} trên ${frames.length} frame. CVAT có thể tự chuyển frame để nạp point cloud. Tiếp tục?`)) return;
+  if (needsCloud && !safeData() && frames.length > 30 &&
+      !confirm(`${measure ? 'Đo đáy theo' : 'Fit'} ${label} trên ${frames.length} frame. CVAT có thể tự chuyển frame để nạp point cloud. Tiếp tục?`)) return;
 
-  renderGroundMissing(report, missing, refIds);
-  const batch = createBatch(`Fit Ground · ${label}`);
+  renderGroundResult(report, missing);
+  const batch = measure ? null : createBatch(`Fit Ground · ${label}`);
   try {
    for (const frame of frames) {
     if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) break;
@@ -2145,12 +2198,12 @@ async function runGroundFit(kind, { fullControl = false, row = null } = {}) {
     for (const id of targetIds) {
      const state = await getState(id, frame);
      if (!isCuboid(state) || state.outside || (keyframesOnly && !isKey(state))) continue;
-     if (state.lock || state.isGroundTruth) { protectedCount++; continue; }
+     if (batch && (state.lock || state.isGroundTruth)) { protectedCount++; continue; }
      states.push(state);
     }
     if (!states.length) continue;
     scanned++;
-    if (frames.length > 1) setStatus(`Đang fit ${label} · F${frame} / F${frames.at(-1)}`, '', { silentToast: true });
+    if (frames.length > 1) setStatus(`Đang ${measure ? 'đo đáy theo' : 'fit'} ${label} · F${frame} / F${frames.at(-1)}`, '', { silentToast: true });
     let framePlane = null;
     let positions = null;
     if (anchor) {
@@ -2159,13 +2212,16 @@ async function runGroundFit(kind, { fullControl = false, row = null } = {}) {
       if (!isCuboid(state) || state.outside) continue;
       const plane = planeFromSingleBox(state.points);
       framePlane = { ...plane, source: `anchor #${id} @f${frame}`, frame };
-      groundPlaneCache.set(gpKey(frame), framePlane);
+      if (batch) groundPlaneCache.set(gpKey(frame), framePlane);
       break;
      }
+    } else if (lidarOrigin) {
+     framePlane = await lidarOriginPlaneAtFrame(job, frame);
     } else {
-     const cached = !lidar && fullControl && fcRowByFrame(frame);
+     const cached = fullControl && fcRowByFrame(frame);
      if (getFrame() === frame) positions = await cloudAtFrame(frame, null);
-     if (!positions && cached) positions = fcCloud(cached);
+     positions ||= fullSceneCache.get(sceneKey(frame));
+     if (!positions && !lidar && cached) positions = fcCloud(cached);
      if (!positions && getFrame() !== frame && !safeData()) {
       movedForFit = true;
       positions = await cloudAtFrame(frame, previousCloud);
@@ -2175,12 +2231,17 @@ async function runGroundFit(kind, { fullControl = false, row = null } = {}) {
     }
     if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) break;
     for (const state of states) {
-     const plane = anchor || lidar ? framePlane : (positions && estimateGroundPlane(state.points, positions));
+     const plane = framePlane || (needsCloud && !lidar && positions && estimateGroundPlane(state.points, positions));
      if (!plane) { missing.add(frame); continue; }
+     if (measure) {
+      const scale = lidarOrigin ? Math.hypot(plane.a, plane.b, 1) : 1;
+      measurements.push({ frame, id: state.clientID, gap: groundGap(state.points, plane) / scale });
+      continue;
+     }
      fitStates++;
      if (!anchor && targetIds.length === 1) {
       groundPlaneCache.set(gpKey(frame), {
-       ...plane, source: `${lidar ? 'LiDAR' : 'cloud'} @f${frame}`, frame,
+       ...plane, source: label, frame,
        ref: [state.points[0], state.points[1]],
       });
      }
@@ -2204,11 +2265,23 @@ async function runGroundFit(kind, { fullControl = false, row = null } = {}) {
      await goToFrame(originalFrame);
     }
    } finally {
-    result = await batch.finish(getJob() === job);
+    if (batch) result = await batch.finish(getJob() === job);
    }
   }
   if (getJob() !== job) return;
-  renderGroundMissing(report, missing, refIds);
+  if (measure) {
+   if (!scanned) return fail('Không có cuboid hiện trên các frame trong phạm vi đo.');
+   const count = measurements.length;
+   let min = Infinity, max = -Infinity;
+   for (const { gap } of measurements) { min = Math.min(min, gap); max = Math.max(max, gap); }
+   const summary = count
+    ? `Đo đáy theo ${label} · ${count} lượt đo · ${fmtSigned(min, 3)} đến ${fmtSigned(max, 3)} m`
+    : `Chưa đo được đáy theo ${label}.`;
+   renderGroundResult(report, missing, missingSource, { summary, rows: measurements });
+   setStatus(summary + (missing.size ? ` · Thiếu dữ liệu ở ${missing.size} frame.` : ''), missing.size ? 'warn' : 'success');
+   return;
+  }
+  renderGroundResult(report, missing, missingSource);
   if (anchor) {
    invalidateHealthCache();
    await healthRefresh(true);
@@ -2216,12 +2289,12 @@ async function runGroundFit(kind, { fullControl = false, row = null } = {}) {
   if (result.changed && fc.open && !fc.toolsOpen) await fcReloadStates();
   if (!scanned && !protectedCount) return fail('Không có cuboid hiện trên các frame trong phạm vi fit.');
   const gaps = formatFrameRanges([...missing]).map(({ text }) => text);
-  const missingText = missing.size ? ` Bỏ qua ${missing.size} frame thiếu ${anchor ? 'Anchor' : 'dữ liệu mặt đất'} (${gaps.slice(0, 12).join(', ')}${gaps.length > 12 ? ', …' : ''}).` : '';
+  const missingText = missing.size ? ` Bỏ qua ${missing.size} frame thiếu ${missingSource} (${gaps.slice(0, 12).join(', ')}${gaps.length > 12 ? ', …' : ''}).` : '';
   const protectedText = protectedCount ? ` Bỏ qua ${protectedCount} cuboid đã khoá hoặc ground truth.` : '';
   const directionText = skippedDirection ? ` Bỏ qua ${skippedDirection} lượt theo hướng đã chọn.` : '';
   const message = result.changed ? `Đã fit ${result.changed} lượt.` : fitStates ? 'Cuboid không cần thay đổi theo tuỳ chọn hiện tại.' : 'Chưa fit được cuboid.';
   setStatus(label + ' · ' + message + missingText + protectedText + directionText +
-   (!anchor && safeData() && missing.size ? ' Bật Tự nạp Cloud nếu cần quét frame chưa có dữ liệu.' : '') +
+   (needsCloud && safeData() && missing.size ? ' Bật Tự nạp Cloud nếu cần quét frame chưa có dữ liệu.' : '') +
    editSuffix(result), missing.size || protectedCount || result.errors || !result.restored ? 'warn' : 'success');
  } finally {
   groundFitting = false;
@@ -7742,7 +7815,7 @@ async function fcLoadTrack(id = readObjectId($('cqt-fc-target'))) {
  fc.rowsByFrame = new Map(fc.allRows.map((row) => [row.frame, row]));
  fc.selected.clear();
  fc.lastClicked = null;
- renderGroundMissing($('cqt-fc-ground-result'), new Set(), []);
+ renderGroundResult($('cqt-fc-ground-result'), new Set());
  fc.focusFrame = getFrame();
  fcComputeExtent();
  fcRenderList();
@@ -8995,12 +9068,12 @@ function fcUpdateRowMeta(row) {
  const plane = row.ground || null;
  const gap = plane ? groundGap(p, plane) : null;
  const infoEl = el.querySelector('[data-role="info"]');
- const gapShort = gap === null ? (cloud ? 'Đáy:--' : 'Chưa có cloud') : `Đáy ${fmtSigned(gap, 2)}m`;
+ const gapShort = gap === null ? (cloud ? 'Đáy (Cloud) --' : 'Chưa có cloud') : `Đáy (Cloud) ${fmtSigned(gap, 2)}m`;
  const ptsShort = cloud ? ` · ${row.pointsIn ?? 0}đ` : '';
  infoEl.textContent = `X:${p[0].toFixed(1)} Y:${p[1].toFixed(1)} Z:${p[2].toFixed(2)} · ${gapShort}${ptsShort}`;
  infoEl.title =
   `x ${p[0].toFixed(3)}  y ${p[1].toFixed(3)}  z ${p[2].toFixed(3)}\n` +
-  (gap === null ? (cloud ? 'Đáy: chưa đo được mặt đất' : 'Đáy: chưa có cloud') : `Đáy lệch đất ${fmtSigned(gap, 3)} m`) +
+  (gap === null ? (cloud ? 'Đáy: chưa đo được mặt đất' : 'Đáy: chưa có cloud') : `Đáy so với mặt đất từ cloud quanh cuboid ${fmtSigned(gap, 3)} m`) +
   (cloud ? ` · ${row.pointsIn ?? 0} điểm` : '');
 }
 
@@ -9874,8 +9947,10 @@ const FC_HTML = `
    <label id="cqt-fc-ground-anchor-field" class="cqt-col" hidden><span class="cqt-label">Anchor ID ưu tiên</span>
     <input id="cqt-fc-ground-anchor-ids" class="cqt-input" type="text" placeholder="vd: 1, 4" />
    </label>
-   <button id="cqt-fc-ground" class="cqt-btn cqt-btn-primary cqt-sm">Fit chạm đất</button>
+   <button id="cqt-fc-ground" class="cqt-btn cqt-btn-primary cqt-sm">Fit theo mốc</button>
+   <button type="button" id="cqt-fc-ground-measure" class="cqt-btn cqt-btn-secondary cqt-sm" title="Đo theo nguồn và phạm vi đã chọn">Đo đáy</button>
   </div>
+  <p id="cqt-fc-ground-origin-hint" class="cqt-hint" hidden>${LIDAR_ORIGIN_HINT}</p>
   <div id="cqt-fc-ground-lidar-fields" class="cqt-row cqt-wrap cqt-ground-controls" hidden>
    ${lidarGroundFields('fc-')}
   </div>
@@ -10231,6 +10306,7 @@ function fcBindWindow(el) {
  on('cqt-fc-interp', () => fcInterpolate(fcSelectedRows(), 'Nội suy đầu → cuối'));
  on('cqt-fc-snap', () => fcSnapRows(fcSelectedRows()));
  on('cqt-fc-ground', () => runGroundFit(val('cqt-fc-ground-kind'), { fullControl: true }));
+ on('cqt-fc-ground-measure', () => runGroundFit(val('cqt-fc-ground-kind'), { fullControl: true, measure: true }));
  on('cqt-fc-ground-kind', () => syncGroundFitControls(true), 'change');
  on('cqt-fc-ground-anchor-ids', (e) => setReferenceBoxIds(parseReferenceBoxIds(e.target.value)), 'change');
  bindGroundMissing($('cqt-fc-ground-result'), true);
@@ -12590,8 +12666,17 @@ ${groundFitSelect('cqt-ground-scope', 'Phạm vi dải', {
 })}
 ${groundFitSelect('cqt-ground-mode', 'Cách đặt', GROUND_FIT_MODES)}
 ${groundFitSelect('cqt-ground-direction', 'Hướng', GROUND_FIT_DIRECTIONS)}
-<button id="cqt-btn-ground-fit" class="cqt-btn cqt-btn-primary">Fit chạm đất</button>
+<button id="cqt-btn-ground-fit" class="cqt-btn cqt-btn-primary">Fit theo mốc</button>
+<button type="button" id="cqt-btn-ground-measure" class="cqt-btn cqt-btn-secondary" title="Đo theo nguồn và phạm vi đã chọn">Đo đáy</button>
 </div>
+<p id="cqt-ground-origin-hint" class="cqt-hint" hidden>${LIDAR_ORIGIN_HINT}</p>
+<details id="cqt-ground-lidar-fields" class="cqt-disclosure" hidden>
+<summary>Bán kính và tâm lấy điểm quanh LiDAR</summary>
+<div class="cqt-row cqt-wrap">
+${lidarGroundFields()}
+</div>
+<p class="cqt-hint">Để trống X và Y để tự xác định tâm. Dùng X/Y thủ công khi cloud theo hệ tọa độ thế giới và đã biết vị trí cảm biến.</p>
+</details>
 <p id="cqt-ground-anchor-hint" class="cqt-hint" hidden>Mỗi frame dùng Anchor đầu tiên còn hiện trong danh sách ưu tiên. Frame thiếu Anchor sẽ xuất hiện bên dưới.</p>
 <div id="cqt-ground-result" class="cqt-ground-result" role="status" hidden></div>
 <details id="cqt-ground-anchor-controls" class="cqt-disclosure">
@@ -12619,7 +12704,7 @@ ${groundFitSelect('cqt-ground-direction', 'Hướng', GROUND_FIT_DIRECTIONS)}
 </div>
 </details>
 <details class="cqt-disclosure">
-<summary>Mặt phẳng đã lưu và đo đáy</summary>
+<summary>Mặt phẳng đã lưu</summary>
 <div id="cqt-plane-display" class="cqt-hint" style="background:var(--cqt-bg-input); padding:6px 8px; border-radius:5px; border:1px solid var(--cqt-border);">Chưa có mặt phẳng. Chọn nguồn bên dưới nếu cần dùng lại một mặt phẳng.</div>
 <div class="cqt-row" style="gap:4px;">
 <button id="cqt-btn-calc-plane" class="cqt-btn cqt-btn-secondary cqt-sm" title="Fit mặt phẳng dốc 3D từ point cloud quanh box">Từ Cloud</button>
@@ -12629,15 +12714,8 @@ ${groundFitSelect('cqt-ground-direction', 'Hướng', GROUND_FIT_DIRECTIONS)}
 <label class="cqt-check"><input type="checkbox" id="cqt-ground-auto-fallback" checked /> Kế thừa mặt phẳng trước khi lấy nguồn từ Cloud bị thiếu</label>
 <div class="cqt-row cqt-wrap">
 <button id="cqt-btn-apply-ground" class="cqt-btn cqt-btn-secondary">Áp mặt phẳng đã lưu</button>
-<button id="cqt-btn-check-ground" class="cqt-btn cqt-btn-secondary cqt-none">Đo đáy</button>
+<button id="cqt-btn-check-ground" class="cqt-btn cqt-btn-secondary cqt-none">Đo theo mặt phẳng đã lưu</button>
 </div>
-</details>
-<details class="cqt-disclosure">
-<summary>Tuỳ chỉnh gốc LiDAR</summary>
-<div class="cqt-row cqt-wrap">
-${lidarGroundFields()}
-</div>
-<p class="cqt-hint">Để trống X và Y để tự xác định tâm. Dùng X/Y thủ công khi cloud theo hệ tọa độ thế giới và đã biết vị trí cảm biến.</p>
 </details>
 </div>
 </div>
@@ -13315,6 +13393,7 @@ function bindActions(wrapper) {
   }));
  }
  bindGroundMissing($('cqt-ground-result'));
+ on('cqt-btn-ground-measure', () => runGroundFit(val('cqt-ground-kind'), { measure: true }));
  on("cqt-ground-z", onGroundZInput, "change");
  on("cqt-btn-check-ground", checkGround);
  on("cqt-btn-apply-ground", applyGroundFit);
