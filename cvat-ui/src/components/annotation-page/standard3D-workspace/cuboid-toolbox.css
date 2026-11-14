@@ -635,9 +635,70 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
 
 @media (min-width: 1220px) {
     #cvat-cuboid-toolbox.cqt-fc-tools-docked #cqt-fc-window.maximized {
-        left: 400px !important;
+        left: 0 !important;
         max-width: calc(100vw - 400px);
     }
+}
+
+#cvat-cuboid-toolbox .cqt-fc-context {
+    flex: none;
+    min-height: 32px;
+    padding: 3px 10px;
+    border-top: 1px solid var(--cqt-border);
+    background: var(--cqt-bg-bar);
+}
+
+@container (max-width: 650px) {
+    #cvat-cuboid-toolbox #cqt-fc-context-scope { display: none; }
+}
+
+#cvat-cuboid-toolbox #cqt-fc-context-slider {
+    min-width: 28px;
+    max-width: 260px;
+    flex: 1;
+}
+
+#cvat-cuboid-toolbox #cqt-fc-review-state {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+#cvat-cuboid-toolbox .cqt-tabs {
+    flex-wrap: wrap;
+}
+
+#cvat-cuboid-toolbox .cqt-compare-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 125px), 1fr));
+    gap: 8px;
+}
+
+#cvat-cuboid-toolbox .cqt-compare-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    border: 1px solid var(--cqt-border);
+    border-radius: 6px;
+    background: var(--cqt-bg-card);
+}
+
+#cvat-cuboid-toolbox .cqt-compare-card canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+}
+
+#cvat-cuboid-toolbox .cqt-workspace-result {
+    white-space: pre-line;
+}
+
+#cvat-cuboid-toolbox #cqt-workspace-history details {
+    padding-block: 6px;
+    border-top: 1px solid var(--cqt-border);
+    overflow-wrap: anywhere;
 }
 
 #cvat-cuboid-toolbox #cqt-modal {

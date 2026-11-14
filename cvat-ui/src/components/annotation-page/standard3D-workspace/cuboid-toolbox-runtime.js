@@ -1,4 +1,5 @@
 // CVAT Cuboid Toolbox, adapted from the userscript by Antigravity.
+import { annotationFingerprint, issueGroups, planTrackRepair, pointsInRegion, resizeFace } from './cuboid-workspace-model.js';
 function flatPlane(z) {
  return { a: 0, b: 0, c: z, slopeDeg: 0 };
 }
@@ -45,7 +46,7 @@ const FOOT_GROUND_MIN_RADIUS = 0.5;
 const FOOT_GROUND_MAX_RADIUS = 15;
 const FOOT_GROUND_MAX_SLOPE = Math.tan(15 * Math.PI / 180);
 const GROUND_COVERAGE_MASKS = new Set([0b0111, 0b1011, 0b1101, 0b1110, 0b1111]);
-function supportedGroundPlane(samples, tolerance, minimumSupport, fraction, candidatePool = samples) {
+function supportedGroundPlane(samples, tolerance, minimumSupport, fraction, candidatePool = samples, evidence = false) {
  if (samples.length < minimumSupport) return null;
  if (candidatePool.length < 3) return null;
  candidatePool.sort(([x1, y1], [x2, y2]) => x1 - x2 || y1 - y2);
@@ -84,7 +85,11 @@ function supportedGroundPlane(samples, tolerance, minimumSupport, fraction, cand
  if (!best) return null;
  const plane = fitPlaneLSQ(support);
  if (!plane || Math.hypot(plane.a, plane.b) > FOOT_GROUND_MAX_SLOPE) return null;
- return { ...plane, count: support.length };
+ if (!evidence) return { ...plane, count: support.length };
+ const used = new Set(support);
+ const coverage = new Set(support.map(([x, y]) => (x >= 0 ? 1 : 0) + (y >= 0 ? 2 : 0))).size;
+ const residual = Math.sqrt(support.reduce((sum, [x, y, z]) => sum + (z - plane.a * x - plane.b * y - plane.c) ** 2, 0) / support.length);
+ return { ...plane, count: support.length, support, rejected: samples.filter((point) => !used.has(point)), coverage, residual };
 }
 
 function addGroundSample(tiles, tileSize, x, y, z) {
@@ -101,7 +106,7 @@ function lowGroundSamples(tiles, minimum, quantile) {
  });
 }
 
-export function estimateFootGround(positions, { x: originX, y: originY, bottom, radius, halfLength, halfWidth, yaw }) {
+export function estimateFootGround(positions, { x: originX, y: originY, bottom, radius, halfLength, halfWidth, yaw }, evidence = false) {
  if (!positions?.length || ![originX, originY, bottom, radius, halfLength, halfWidth, yaw].every(Number.isFinite) || radius <= 0) return null;
  const radiusSquared = radius ** 2;
  const cos = Math.cos(yaw), sin = Math.sin(yaw);
@@ -121,15 +126,17 @@ export function estimateFootGround(positions, { x: originX, y: originY, bottom, 
   for (const [u, v, z] of near) {
    if (Math.abs(u) <= halfLength + margin && Math.abs(v) <= halfWidth + margin) addGroundSample(tiles, tileSize, u, v, z);
   }
-  const plane = supportedGroundPlane(lowGroundSamples(tiles, 3, 0.2), 0.035, 6, 0.45);
+  const plane = supportedGroundPlane(lowGroundSamples(tiles, 3, 0.2), 0.035, 6, 0.45, undefined, evidence);
   if (!plane) continue;
   const a = plane.a * cos - plane.b * sin, b = plane.a * sin + plane.b * cos;
-  return { a, b, c: plane.c - a * originX - b * originY, count: plane.count };
+  const world = (points) => points?.map(([u, v, z]) => [originX + u * cos - v * sin, originY + u * sin + v * cos, z]);
+  return { ...plane, a, b, c: plane.c - a * originX - b * originY,
+   ...(evidence ? { support: world(plane.support), rejected: world(plane.rejected) } : {}) };
  }
  return null;
 }
 
-export function estimateSceneGround(positions) {
+export function estimateSceneGround(positions, evidence = false) {
  if (!positions?.length) return null;
  const xs = [], ys = [];
  const sampleStep = 3 * Math.max(1, Math.ceil(positions.length / 12000));
@@ -157,8 +164,10 @@ export function estimateSceneGround(positions) {
  const ceiling = heights[Math.floor(heights.length * 0.45)] + 0.25;
  // Seed from low returns, then evaluate the plane against tiles from the entire scene.
  const lower = samples.filter((point) => point[2] <= ceiling);
- const plane = supportedGroundPlane(samples, 0.18, 12, 0.13, lower);
- return plane && { ...plane, c: plane.c - plane.a * originX - plane.b * originY };
+ const plane = supportedGroundPlane(samples, 0.18, 12, 0.13, lower, evidence);
+ const world = (points) => points?.map(([x, y, z]) => [x + originX, y + originY, z]);
+ return plane && { ...plane, c: plane.c - plane.a * originX - plane.b * originY,
+  ...(evidence ? { support: world(plane.support), rejected: world(plane.rejected) } : {}) };
 }
 
 // Fit the lowest supported surface in tiles around the sensor.
@@ -226,7 +235,7 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '4.9.6';
+const VERSION = '5.0.0';
 const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
@@ -1410,11 +1419,14 @@ function snapshotItem(state, frame) {
  return {
   clientID: state.clientID,
   frame,
+  affectedFrom: state.keyframes?.prev ?? frame,
+  affectedTo: state.objectType === 'track' ? (state.keyframes?.next ?? jobBounds()?.stop ?? frame) : frame,
   objectType: state.objectType,
   points: [...state.points],
   keyframe: isKey(state),
   outside: !!state.outside,
   occluded: !!state.occluded,
+  attributes: { ...state.attributes },
  };
 }
 
@@ -1478,7 +1490,7 @@ async function applySnapshotItems(items) {
  for (const item of [...items].reverse()) {
   try {
    const s = await getState(item.clientID, item.frame, true);
-   if (!s) continue;
+   if (!isCuboid(s) || s.lock || s.isGroundTruth) { errors++; continue; }
    reverseSnapshot.push(snapshotItem(s, item.frame));
    // Không gỡ keyframe (quy định dự án): frame vốn nội suy sẽ giữ keyframe, nhưng về đúng giá trị cũ
    s.points = item.points;
@@ -1487,7 +1499,9 @@ async function applySnapshotItems(items) {
     if (!item.outside) s.keyframe = true;
    }
    s.occluded = item.occluded;
+   if (item.attributes) s.attributes = { ...item.attributes };
    await saveState(s);
+   workspaceRevision++;
    restored++;
   } catch (e) {
    errors++;
@@ -1622,6 +1636,8 @@ function createBatch(label) {
    }
    try {
     await saveState(state);
+    before.after = snapshotItem(state, frame);
+    workspaceRevision++;
    } catch (e) {
     errors++;
     console.warn(LOG, `Lưu #${state.clientID} frame ${frame} lỗi:`, e);
@@ -2272,6 +2288,7 @@ function fcFootGroundRing(row) {
  return groundScanRingPoints(region, plane);
 }
 
+let groundScanOverlayEvidence = null;
 function drawGroundScanOverlay() {
  groundScanOverlayRaf = 0;
  const ring = groundScanRing;
@@ -2304,6 +2321,31 @@ function drawGroundScanOverlay() {
   context.strokeStyle = FOOT_GROUND_COLOR;
   context.lineWidth = 1.5;
   context.stroke();
+  const evidence = groundScanOverlayEvidence;
+  if (evidence) {
+   const screen = (x, y, z) => {
+    const viewPoint = applyMat4(camera.matrixWorldInverse.elements, [x, y, z]);
+    if (viewPoint[2] >= -camera.near) return null;
+    const p = applyMat4(camera.projectionMatrix.elements, viewPoint);
+    return [(p[0] + 1) * width / 2, (1 - p[1]) * height / 2];
+   };
+   for (const [samples, color, size] of [[evidence.plane.rejected, '#a1a1aa', 1.6], [evidence.plane.support, FOOT_GROUND_COLOR, 3]]) {
+    context.fillStyle = color;
+    for (const sample of samples || []) {
+     const p = screen(...sample);
+     if (p) context.fillRect(p[0] - size / 2, p[1] - size / 2, size, size);
+    }
+   }
+   const corners = boxCorners(evidence.after).map((corner) => screen(...corner));
+   const edges = [[0, 1], [1, 3], [3, 2], [2, 0], [4, 5], [5, 7], [7, 6], [6, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+   context.beginPath();
+   for (const [a, b] of edges) {
+    if (!corners[a] || !corners[b]) continue;
+    context.moveTo(...corners[a]);
+    context.lineTo(...corners[b]);
+   }
+   context.stroke();
+  }
  }
  groundScanOverlayRaf = requestAnimationFrame(drawGroundScanOverlay);
 }
@@ -2338,11 +2380,17 @@ function refreshGroundScanRing() {
    }
   }
  }
- const key = points ? `${frame}:${points.flat().join(',')}` : null;
+ const previewEntry = loadedCloudFrame() === frame && !stealthUI &&
+  footGroundPreview?.rows.get(`${frame}:${fc.open ? fc.targetId : resolveTargetId()}`);
+ if (previewEntry && !points) points = groundScanRingPoints(footGroundRegion(previewEntry.before, null), previewEntry.plane);
+ const evidenceEntry = workspaceEvidence ? previewEntry : null;
+ if (evidenceEntry) groundScanOverlayEvidence = evidenceEntry;
+ else groundScanOverlayEvidence = null;
+ const key = points ? `${frame}:${points.flat().join(',')}:${previewEntry ? `${groundPreviewRequest}:${workspaceEvidence}` : 'ring'}` : null;
  if (groundScanRing?.canvas === canvas && groundScanRing?.key === key) return;
  if (groundScanRing) clearGroundScanRing();
  if (!points) return;
- const native = typeof canvas?.setGroundScanRing === 'function';
+ const native = typeof canvas?.setGroundScanRing === 'function' && !previewEntry;
  groundScanRing = { canvas, frame, key, native, points };
  if (native) {
   canvas.setGroundScanRing(frame, points);
@@ -2384,7 +2432,8 @@ function clearFootGroundPreview() {
   if (button) button.hidden = true;
  }
  if (hadPreview) {
-  fcRerenderVisible('3d');
+  fcRerenderVisible();
+  scheduleDockRender();
   refreshGroundScanRing();
  }
 }
@@ -2446,18 +2495,22 @@ async function previewFootGround(fullControl, focusApply = false) {
    const positions = await footGroundCloud(frame);
    if (!isCurrent()) return;
    if (!positions?.length) { missingCloud.add(frame); continue; }
-   const scenePlane = foot ? null : estimateSceneGround(positions);
+   const scenePlane = foot ? null : estimateSceneGround(positions, true);
    for (const state of editable) {
     const before = [...state.points];
     const region = foot ? footGroundRegion(before, radius) : null;
-    const plane = region ? estimateFootGround(positions, region) : scenePlane;
+    const mask = workspaceRegion?.id === state.clientID && workspaceRegion.frame === frame ? workspaceRegion : null;
+    const samples = mask ? pointsInRegion(positions, mask) : positions;
+    const plane = region ? estimateFootGround(samples, region, true) : mask ? estimateSceneGround(samples, true) : scenePlane;
     if (!plane) { missingGround.add(frame); continue; }
     const after = fitToGround(before, plane, mode);
     const dz = after[2] - before[2];
     const directionMatches = (direction !== 'down' || dz <= 1e-4) && (direction !== 'up' || dz >= -1e-4);
-    const changed = directionMatches && (Math.abs(dz) >= 1e-4 || Math.abs(after[3] - before[3]) > 1e-6 || Math.abs(after[4] - before[4]) > 1e-6);
+    const localPlane = foot ? null : estimateFootGround(samples, footGroundRegion(before, null));
+    const uncertain = plane.coverage < 3 || (localPlane && Math.abs(planeZ(localPlane, before[0], before[1]) - planeZ(plane, before[0], before[1])) > 0.18);
+    const changed = !uncertain && directionMatches && (Math.abs(dz) >= 1e-4 || Math.abs(after[3] - before[3]) > 1e-6 || Math.abs(after[4] - before[4]) > 1e-6);
     const id = state.clientID;
-    rows.set(`${frame}:${id}`, { frame, id, before, after, plane, dz, radius: region?.radius, changed, directionMatches, keyframe: isKey(state) });
+    rows.set(`${frame}:${id}`, { frame, id, before, after, plane, dz, radius: region?.radius, changed, directionMatches, keyframe: isKey(state), uncertain, fingerprint: annotationFingerprint(state) });
    }
   }
   if (!isCurrent()) return;
@@ -2481,15 +2534,23 @@ async function previewFootGround(fullControl, focusApply = false) {
    }
    const area = row.radius === undefined ? 'Toàn cảnh' : `Bán kính ${row.radius.toFixed(2)} m`;
    const object = ids.length > 1 ? ` · #${row.id}` : '';
-   return `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${row.frame}" title="${area} · ${row.plane.count} ô có điểm mặt đất">F${row.frame}${object} · ${adjustment}</button>`;
+   const evidence = ` · ${row.plane.count} mẫu · ${row.plane.coverage}/4 vùng · RMS ${(row.plane.residual * 100).toFixed(1)} cm`;
+   if (row.uncertain) adjustment = 'Cần xem lại · mặt phẳng không khớp dưới chân';
+   return `<div class="cqt-row"><label class="cqt-check" title="Chọn frame cần áp dụng"><input type="checkbox" data-ground-select="${row.frame}:${row.id}" ${row.changed ? 'checked' : 'disabled'} aria-label="Áp dụng F${row.frame}${object}"></label><button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${row.frame}" title="${area}${evidence}">F${row.frame}${object} · ${adjustment}${evidence}</button></div>`;
   }).join('');
   result.innerHTML = `<div data-foot-ground-preview><div>${summary}</div>${rows.size ? `<details ${rows.size <= 6 ? 'open' : ''}>
    <summary>Kết quả từng frame</summary><div class="cqt-row cqt-wrap">${frameResults}</div></details>` : ''}
    ${missing(missingCloud, 'Chưa có point cloud')}${missing(missingGround, 'Điểm mặt đất chưa đủ tin cậy')}
    ${newKeys ? '<div>Undo khôi phục tọa độ và giữ các keyframe mới.</div>' : ''}</div>`;
   footGroundPreview = { key, fullControl, rows, kind };
+  fcRerenderVisible();
+  scheduleDockRender();
   const applyButton = $(fullControl ? 'cqt-fc-ground-apply' : 'cqt-btn-ground-apply');
   applyButton.hidden = !edits.length;
+  result.querySelectorAll('[data-ground-select]').forEach((input) => input.addEventListener('change', () => {
+   applyButton.disabled = !result.querySelector('[data-ground-select]:checked');
+  }));
+  applyButton.disabled = !edits.length;
   if (focusApply && edits.length) applyButton.focus({ preventScroll: true });
   fcRerenderVisible('3d');
   refreshGroundScanRing();
@@ -2514,11 +2575,13 @@ async function applyFootGroundPreview(fullControl) {
  groundFitting = true;
  button.disabled = true;
  try {
+  const result = $(fullControl ? 'cqt-fc-ground-result' : 'cqt-ground-result');
+  const selected = new Set([...result.querySelectorAll('[data-ground-select]:checked')].map((input) => input.dataset.groundSelect));
   const edits = [];
   for (const row of preview.rows.values()) {
-   if (!row.changed) continue;
+   if (!row.changed || !selected.has(`${row.frame}:${row.id}`)) continue;
    const state = await getState(row.id, row.frame, true);
-   if (!isCuboid(state) || state.outside || state.lock || state.isGroundTruth || !fcSamePoints(state.points, row.before) || isKey(state) !== row.keyframe) {
+   if (!isCuboid(state) || state.outside || state.lock || state.isGroundTruth || annotationFingerprint(state) !== row.fingerprint) {
     clearFootGroundPreview();
     return fail(`F${row.frame} đã thay đổi. Bấm Xem trước để tính lại.`);
    }
@@ -5510,6 +5573,8 @@ const QA_TYPES = {
  dist: 'Quá xa',
  limits: 'Ngoài limits',
  ground: 'Chưa chạm đất',
+ motion: 'Tâm nhảy bất thường',
+ support: 'Ít điểm quan sát',
 };
 
 let lastQA = null; // { rows, data, opts, range }
@@ -5601,10 +5666,11 @@ function qaRange(opts) {
 }
 
 // Đọc toàn bộ cuboid trong dải: tracks (theo clientID) + danh sách theo frame
-async function scanJobData(from, to, onlyId = null) {
+async function scanJobData(from, to, onlyId = null, cancelled = () => false) {
  const tracks = new Map();
  const frames = new Map();
  for (let f = from; f <= to; f++) {
+  if (cancelled() || scope.signal.aborted) break;
   if (f > from && (f - from) % 20 === 0) {
    setStatus(`⏳ QA: đọc frame ${f}/${to}...`);
    await sleep(0);
@@ -5619,7 +5685,7 @@ async function scanJobData(from, to, onlyId = null) {
     rec = { id: s.clientID, label: labelName(s), objectType: s.objectType, hasTrackAttr: !!tid.spec, frames: [] };
     tracks.set(s.clientID, rec);
    }
-   const item = { frame: f, points: [...s.points], keyframe: isKey(s), tidKey: tid.key, tid: tid.value };
+   const item = { frame: f, points: [...s.points], keyframe: isKey(s), tidKey: tid.key, tid: tid.value, fingerprint: annotationFingerprint(s) };
    rec.frames.push(item);
    list.push({ id: s.clientID, label: rec.label, points: item.points, tidKey: tid.key, tid: tid.value });
   }
@@ -5653,7 +5719,7 @@ async function runQAChecks(data, opts) {
  for (const rec of data.tracks.values()) {
   if (performance.now() - lastYield > 20) { await sleep(0); lastYield = performance.now(); }
   // Thiếu track_id: shape không có thuộc tính track_id, hoặc thuộc tính track_id để trống
-  if (opts.missingTrack) {
+  if (opts.missingTrack && rec.hasTrackAttr) {
    for (const x of rec.frames) {
     if (x.tidKey != null) continue;
     row(x.frame, rec, QA_TYPES.missingTrack,
@@ -5686,12 +5752,20 @@ async function runQAChecks(data, opts) {
   }
 
   // Đổi hướng đột ngột giữa 2 frame liên tiếp
-  if (opts.yaw) {
+  if (opts.yaw || opts.motion) {
    for (let i = 1; i < rec.frames.length; i++) {
     const a = rec.frames[i - 1], b = rec.frames[i];
     if (b.frame !== a.frame + 1) continue;
     const d = angleDiff(b.points[5], a.points[5]) * DEG;
-    if (d <= opts.yawThresh) continue;
+    if (opts.motion) {
+    const relative = ego.rel.get(b.frame);
+    const [x, y] = relative?.ok ? egoApply(relative, b.points[0], b.points[1]) : b.points;
+    const displacement = Math.hypot(x - a.points[0], y - a.points[1]);
+    if (displacement > opts.motionThreshold) row(b.frame, rec, QA_TYPES.motion,
+     `Tâm thay đổi F${a.frame} → F${b.frame} · ${relative?.ok ? 'đã bù LiDAR XY' : 'hệ tọa độ frame, chưa bù LiDAR'}`,
+     `${displacement.toFixed(2)} m/frame`, `≤ ${opts.motionThreshold} m/frame`);
+   }
+   if (!opts.yaw || d <= opts.yawThresh) continue;
     row(b.frame, rec, QA_TYPES.yaw,
      `Obj thay đổi hướng đột ngột ${d.toFixed(1)}° (yaw ${(wrapPi(a.points[5]) * DEG).toFixed(1)}° ở frame ${a.frame} -> ${(wrapPi(b.points[5]) * DEG).toFixed(1)}° ở frame ${b.frame})`,
      d.toFixed(2), `≤ ${opts.yawThresh}°`);
@@ -5831,6 +5905,7 @@ async function scanGroundRows(data, opts) {
  let noCloud = 0, noGround = 0, checked = 0;
  const busy = beginBusy('qa-ground');
  for (let i = 0; i < frames.length; i++) {
+  if (workspaceScanCancelled || scope.signal.aborted) break;
   const f = frames[i];
   setStatus(`⏳ QA mặt đất: frame ${f} (${i + 1}/${frames.length})...`);
   const pos = await cloudAtFrame(f, prev);
@@ -5864,6 +5939,7 @@ function invalidateQC() {
  if (!lastQA) return;
  qcDirty = true;
  renderQC();
+ workspaceRenderIssues();
 }
 
 function scanQA() {
@@ -5878,6 +5954,7 @@ function scanQA() {
  }).finally(() => {
   qaInFlight = null;
   renderQC();
+  workspaceRenderIssues();
  });
  renderQC();
  return qaInFlight;
@@ -5887,15 +5964,40 @@ async function scanQAImpl() {
  const opts = readQAOptionsFromUI();
  const range = qaRange(opts);
  if (!range) return null;
+ const filter = val('cqt-review-scope');
+ const context = workspaceContext();
+ const target = filter === 'object' ? context.id : filter === 'group' ? new Set(selectedOrTarget()) : null;
+ if (filter === 'object' && !Number.isInteger(target) || filter === 'group' && !target.size) return fail('Chọn cuboid trước khi quét.');
+ opts.motion = isChecked('cqt-review-motion');
+ opts.support = isChecked('cqt-review-support');
+ opts.motionThreshold = numVal('cqt-review-motion-threshold') || 3;
+ workspaceScanCancelled = false;
+ const startRevision = workspaceRevision;
+ const startHistory = qaHistoryStamp();
  setStatus('⏳ Đang quét QA...');
- const data = await scanJobData(range.from, range.to);
- const rows = await runQAChecks(data, opts);
+ const data = await scanJobData(range.from, range.to, null, () => workspaceScanCancelled);
+ const matched = (id) => target === null || (target instanceof Set ? target.has(id) : target === id);
+ const rows = (await runQAChecks(data, opts)).filter((row) => matched(row.trackId));
+ if (opts.support && !workspaceScanCancelled) {
+  for (const [frame, entries] of data.frames) {
+   if (workspaceScanCancelled || scope.signal.aborted) break;
+   const cloud = fullSceneCache.get(sceneKey(frame)) || (frame === loadedCloudFrame() ? getPointCloudPositions() : null);
+   if (!cloud) continue;
+   for (const entry of entries) {
+    if (!matched(entry.id)) continue;
+    const result = workspaceLocalCloud(entry, cloud);
+    if (result.length < 15) rows.push({ frame, trackId: entry.id, cls: entry.label, type: QA_TYPES.support,
+     desc: 'Thiếu bằng chứng LiDAR trong phần cloud đã lấy mẫu', value: `${result.length} điểm mẫu`, threshold: 'Xem camera hoặc frame lân cận' });
+   }
+   await sleep(0);
+  }
+ }
  let groundNote = '';
  if (opts.ground && safeData()) {
   groundNote = ' Bỏ qua mục "Chưa chạm đất" (cần đọc cloud từng frame) vì đang bật Chế độ an toàn dữ liệu.';
- } else if (opts.ground) {
+ } else if (opts.ground && !workspaceScanCancelled) {
   const g = await scanGroundRows(data, opts);
-  rows.push(...g.rows);
+  rows.push(...g.rows.filter((row) => matched(row.trackId)));
   groundNote = ` Mặt đất: đo ${g.stats.checked} box / ${g.stats.frames} frame` +
    (g.stats.noCloud ? `, ${g.stats.noCloud} frame không đọc được cloud` : '') +
    (g.stats.noGround ? `, ${g.stats.noGround} box thiếu điểm đất` : '') + '.';
@@ -5903,10 +6005,18 @@ async function scanQAImpl() {
  if (opts.dist && currentSensorXY().some((v) => v !== 0)) {
   groundNote += ' Lưu ý: cloud có vẻ theo toạ độ thế giới — mục "Quá xa" đang tính từ gốc toạ độ, không phải từ xe LiDAR.';
  }
- await fillItemIds(rows);
+ if (!workspaceScanCancelled) await fillItemIds(rows);
  if (!getJob()) return null;
+ if (workspaceScanCancelled) groundNote = `Quét dừng · đã đọc ${data.frames.size} frame. ` + groundNote;
+ const fingerprints = new Map([...data.tracks.values()].flatMap((track) => track.frames.map((row) =>
+  [`${track.id}:${row.frame}`, row.fingerprint])));
+ for (const issue of rows) issue.revision = [fingerprints.get(`${issue.trackId}:${issue.frame}`),
+  fingerprints.get(`${issue.trackId}:${issue.frame - 1}`), fingerprints.get(`${issue.related}:${issue.frame}`),
+  issue.plane ? [issue.plane.a, issue.plane.b, issue.plane.c] : null];
  lastQA = { rows, data, opts, range, groundNote, history: qaHistoryStamp() };
- qcDirty = false;
+ qcDirty = workspaceScanCancelled || startRevision !== workspaceRevision || startHistory !== qaHistoryStamp();
+ workspaceIssueIndex = -1;
+ workspaceIssueGroup = null;
  qcPage = 0;
  renderQAResult();
  const tracks = new Set(rows.map((r) => r.trackId)).size;
@@ -5960,7 +6070,7 @@ function renderQAResult() {
 }
 
 function qcIssueKey(issue) {
- return JSON.stringify([issue.frame, issue.trackId, issue.type, issue.related || '', issue.desc]);
+ return JSON.stringify([issue.frame, issue.trackId, issue.type, issue.related || '', issue.desc, issue.revision, issue.threshold]);
 }
 
 function qcReviewState(issue) {
@@ -5985,7 +6095,7 @@ function renderQC() {
  const filter = $('cqt-qc-type');
  const previous = filter.value;
  const counts = new Map();
- const reviewCounts = { pending: 0, reviewed: 0, deferred: 0 };
+ const reviewCounts = { pending: 0, reviewed: 0, deferred: 0, accepted: 0 };
  for (const issue of issues) {
   counts.set(issue.type, (counts.get(issue.type) || 0) + 1);
   reviewCounts[qcReviewState(issue)]++;
@@ -6000,13 +6110,14 @@ function renderQC() {
   ? `F${lastQA.range.from}–F${lastQA.range.to} · ${lastQA.data.tracks.size} object · ${issues.length} lỗi` : 'Chưa quét job';
  $('cqt-qc-totals').textContent = `${reviewCounts.pending} chưa duyệt · ${reviewCounts.reviewed} đã duyệt · ${reviewCounts.deferred} để sau`;
  $('cqt-qc-status').textContent = qaInFlight ? 'Đang quét annotation…' :
-  qcNotice || (qcDirty ? 'Annotation hoặc tiêu chí đã thay đổi. Quét lại trước khi áp sửa.' :
+  qcNotice || (qcDirty ? (lastQA?.groundNote || '') + ' Quét lại trước khi áp sửa.' :
    (lastQA?.groundNote || (lastQA && !lastQA.data.tracks.size ? 'Dải đã quét chưa có cuboid.' : '')));
  $('cqt-qc-prev').disabled = qcPage === 0;
  $('cqt-qc-next').disabled = qcPage === totalPages - 1;
  $('cqt-qc-page').textContent = `${matches.length} kết quả · ${qcPage + 1}/${totalPages}`;
  $('cqt-qc-scan').disabled = !!qaInFlight;
- $('cqt-qc-preview').disabled = !!qaInFlight || !matches.length;
+ $('cqt-qc-preview').disabled = !!qaInFlight || qcDirty || !matches.length;
+ $('cqt-qc-stop').disabled = !qaInFlight;
  $('cqt-qc-export').disabled = safeData() || !issues.length || !!qaInFlight;
  $('cqt-qc-export').title = safeData() ? 'Chế độ an toàn dữ liệu đang bật' : 'Xuất tất cả kết quả của lần quét';
  const body = $('cqt-qc-rows');
@@ -6047,6 +6158,7 @@ function renderQC() {
   review.add(new Option('Chưa duyệt', 'pending'));
   review.add(new Option('Đã duyệt', 'reviewed'));
   review.add(new Option('Để sau', 'deferred'));
+  review.add(new Option('Đúng thực tế', 'accepted'));
   review.value = qcReviewState(issue);
   review.addEventListener('change', () => {
    qcReview.set(qcIssueKey(issue), review.value);
@@ -6088,6 +6200,7 @@ function openQCWorkspace() {
   </header>
   <div class="cqt-qc-toolbar">
    <button id="cqt-qc-scan" class="cqt-btn cqt-btn-primary">Quét QA</button>
+   <button id="cqt-qc-stop" type="button" class="cqt-btn cqt-btn-secondary">Dừng</button>
    <button id="cqt-qc-preview" class="cqt-btn cqt-btn-secondary" title="Xem trước đề xuất cho lỗi đang lọc. Một số đề xuất áp trên cả track.">Xem trước sửa</button>
    <button id="cqt-qc-export" class="cqt-btn cqt-btn-secondary">Xuất CSV</button>
    <span id="cqt-qc-totals"></span>
@@ -6098,7 +6211,7 @@ function openQCWorkspace() {
    <select id="cqt-qc-type" class="cqt-input" aria-label="Loại lỗi"></select>
    <select id="cqt-qc-review" class="cqt-input" aria-label="Lọc theo trạng thái duyệt">
     <option value="">Mọi trạng thái</option><option value="pending">Chưa duyệt</option>
-    <option value="reviewed">Đã duyệt</option><option value="deferred">Để sau</option>
+    <option value="reviewed">Đã duyệt</option><option value="deferred">Để sau</option><option value="accepted">Đúng thực tế</option>
    </select>
   </div>
   <p id="cqt-qc-status" role="status"></p>
@@ -6132,6 +6245,7 @@ function openQCWorkspace() {
  });
  bind('cqt-qc-close', () => closeQCWorkspace());
  bind('cqt-qc-scan', scanQA);
+ bind('cqt-qc-stop', () => { if (qaInFlight) workspaceScanCancelled = true; });
  bind('cqt-qc-export', () => exportQA({ review: true }));
  bind('cqt-qc-preview', () => previewAutoFix(true));
  bind('cqt-qc-prev', () => { qcPage--; renderQC(); });
@@ -6156,7 +6270,7 @@ function exportQA(options) {
  const header = ['Frame', 'Item ID', 'Track ID', 'Class', 'Loại kiểm tra', 'Mô tả', 'Giá trị', 'Ngưỡng / Chuẩn', 'Track liên quan'];
  if (options?.review) header.push('Trạng thái duyệt');
  const lines = [header.join(',')];
- const reviewLabels = { pending: 'Chưa duyệt', reviewed: 'Đã duyệt', deferred: 'Để sau' };
+ const reviewLabels = { pending: 'Chưa duyệt', reviewed: 'Đã duyệt', deferred: 'Để sau', accepted: 'Đúng thực tế' };
  for (const r of lastQA.rows) {
   const fields = [r.frame, r.itemId, r.trackId, r.cls, r.type, r.desc, r.value, r.threshold, r.related];
   if (options?.review) fields.push(reviewLabels[qcReviewState(r)]);
@@ -6711,7 +6825,7 @@ function planFixes(qa, types) {
 
 async function previewAutoFix(filtered = false) {
  const qa = !lastQA || qcDirty ? await scanQA() : lastQA;
- if (!qa) return;
+ if (!qa || qcDirty) return fail('Quét QA đầy đủ trên dữ liệu hiện tại trước khi áp sửa.');
  const scoped = filtered === true ? { ...qa, rows: qcFilteredRows() } : qa;
  const ops = planFixes(scoped, new Set(['missingTrack', 'duplicateTrack', 'unknownClass', 'size', 'yaw', 'ground', 'far', 'overlap']));
  if (!ops.length) return setStatus('✅ Không có lỗi nào cần sửa.', 'success');
@@ -7525,6 +7639,26 @@ const TOOL_SHORTCUTS = [
  ['layout-stacked', 'Full Control · 3D lớn', 'Digit3', '', () => fcSetLayout('stacked'), layoutShortcutAvailable],
  ['points-down', 'Giảm cỡ điểm', 'Alt+Minus', '', () => fcSetPointSize(fc.cfg.pointSize - 1, true), pointSizeShortcutAvailable],
  ['points-up', 'Tăng cỡ điểm', 'Alt+Equal', '', () => fcSetPointSize(fc.cfg.pointSize + 1, true), pointSizeShortcutAvailable],
+ ['review-prev', 'Review · Vấn đề trước', '', '', () => workspaceIssueStep(-1)],
+ ['review-next', 'Review · Vấn đề sau', '', '', () => workspaceIssueStep(1)],
+ ['review-mark', 'Review · Đã duyệt frame', '', '', workspaceMarkReviewed],
+ ['review-defer', 'Review · Để sau', '', '', () => workspaceDisposition('deferred')],
+ ['ref-pin', 'Tham chiếu · Ghim frame', '', '', workspacePin],
+ ['ref-compare', 'Tham chiếu · So sánh', '', '', () => $('cqt-ref-compare').click()],
+ ['slice-toggle', 'Hiển thị · Bật/tắt lát cắt', '', '', async () => {
+  await workspaceOpen('view');
+  $('cqt-slice-enable').click();
+ }],
+ ['face-edit', 'Box · Chỉnh từng mặt', '', '', async () => {
+  await workspaceOpen('object');
+  $('cqt-face-section').open = true;
+  $('cqt-face').focus();
+ }],
+ ['track-repair', 'Track · Sửa track', '', '', async () => {
+  await workspaceOpen('track');
+  $('cqt-track-repair').open = true;
+  $('cqt-repair-kind').focus();
+ }],
  ...[['move', 'Di chuyển cuboid', 'KeyG', 'G'], ['rotate', 'Xoay cuboid', 'KeyW', 'R'], ['scale', 'Co giãn cuboid', 'KeyS', 'S']]
   .map(([id, label, key, mode]) => [id, label, key, key, () => startTransform(mode), canStartShortcutTransform, mode]),
 ];
@@ -7852,6 +7986,23 @@ function onKeyDown(e) {
   return;
  }
  if (handleGroundShortcutKey(e)) return;
+ if (e.key === 'Escape' && !$('cqt-modal') && (!isTyping(e) || e.target.id === 'cqt-slice-enable')) {
+  if (workspaceRegionPicking) {
+   workspaceRegionPicking = null;
+   if (fc.drag?.type === 'ground-region') fc.drag = null;
+   fcRerenderVisible();
+   scheduleDockRender();
+   swallow(e);
+   return;
+  }
+  if (workspaceClearFace()) { swallow(e); return; }
+  if (workspaceSlice) {
+   swallow(e);
+   $('cqt-slice-enable').checked = false;
+   workspaceReadSlice();
+   return;
+  }
+ }
  if (!isTyping(e) && !e.altKey && !e.ctrlKey && !e.metaKey &&
      !$('cqt-modal') && !$('cqt-qc-workspace') && ['Escape', 'Enter'].includes(e.key)) {
   const preview = footGroundPreview;
@@ -8030,6 +8181,7 @@ const FC_BOX_EDGES_3D = [
  [0, 4], [1, 5], [2, 6], [3, 7], // 4 cạnh dọc thân
  [4, 5], [5, 7], [7, 6], [6, 4], // mặt trước (+X)
 ];
+const FC_FACE_AXIS = { front: [0, 1], back: [0, -1], left: [1, 1], right: [1, -1], top: [2, 1], bottom: [2, -1] };
 const FC_FACE_LABEL = { front: 'mặt trước', back: 'mặt sau', left: 'sườn trái', right: 'sườn phải', top: 'nóc', bottom: 'đáy' };
 const FC_ICON_MAX = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>';
 const FC_ICON_RESTORE = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>';
@@ -8253,21 +8405,9 @@ function fcLocalShift(p, du, dv, dw) {
 
 // Kéo 1 mặt ra ngoài thêm d mét (d < 0 = thu vào), mặt đối diện đứng yên (hoặc giữ tâm nếu sym = true)
 function fcResizeFace(p, face, d, sym = false) {
- const MIN = 0.1;
- const L = Math.abs(p[6]), W = Math.abs(p[7]), H = Math.abs(p[8]);
- const delta = sym ? d * 2 : d;
- if (face === 'front' || face === 'back') {
-  return withLWH(p, Math.max(MIN, L + delta), W, H, true, sym ? 'center' : (face === 'front' ? 'back' : 'front'));
- }
- if (face === 'left' || face === 'right') {
-  return withLWH(p, L, Math.max(MIN, W + delta), H, true, sym ? 'center' : (face === 'left' ? 'right' : 'left'));
- }
- const nh = Math.max(MIN, H + delta);
- if (sym) return withLWH(p, L, W, nh, false, 'center');
- if (face === 'top') return withLWH(p, L, W, nh, true, 'center');
- const q = withLWH(p, L, W, nh, false, 'center');
- q[2] = p[2] - (nh - H) / 2; // kéo đáy: giữ nguyên nóc
- return q;
+ const [axis, sign] = FC_FACE_AXIS[face];
+ const normal = rotationMatrix(p[3], p[4], p[5]).map((row) => row[axis] * sign);
+ return resizeFace(p, normal, axis, d, sym);
 }
 
 function fcRotateYaw(p, dyaw) {
@@ -9444,7 +9584,10 @@ function fcRender3D(row, canvas, g, pal) {
  } else {
   delete canvas.dataset.groundScan;
  }
- const preview = footGroundPreview?.fullControl && footGroundPreview.rows.get(`${row.frame}:${fc.targetId}`);
+ workspaceDrawGround(ctx, row, toScreen3D, '3d');
+ workspaceDrawSliceBounds(ctx, row, toScreen3D);
+ workspaceDrawFace(ctx, row, toScreen3D);
+ const preview = workspaceGroundRow(row);
  if (preview?.changed && !row.draft && fcSamePoints(preview.before, row.base)) {
   drawWireBox(preview.after, FOOT_GROUND_COLOR, FOOT_GROUND_COLOR, [5, 4]);
  }
@@ -9710,7 +9853,7 @@ function fcRenderView(row, canvas) {
  }
 
  // Đường mặt đất (SIDE / FRONT)
- const plane = fcGroundPlane(row);
+ const plane = workspaceGroundRow(row)?.plane || fcGroundPlane(row);
  if (plane && view !== 'top') {
   const c = Math.cos(anchor[5]), s = Math.sin(anchor[5]);
   const span = g.cw / g.k + 4;
@@ -9731,18 +9874,22 @@ function fcRenderView(row, canvas) {
  }
 
  // Point cloud: lọc hành lang độ sâu (Slice) + phân loại trong box (sáng) / mặt đất / xung quanh
+ const slice = workspaceSlice?.id === (fc.open ? fc.targetId : dock.id) ? workspaceSlice : null;
+ if (slice) canvas.dataset.slice = `${['X','Y','Z'][slice.axis]} · ${slice.offset.toFixed(2)} m`;
+ else delete canvas.dataset.slice;
  const wideProjection = fcLayout() !== 'table' && fc.cfg.fullSceneDetail &&
   (fc.cfg.slice === 'tight' || fc.cfg.slice === 'scene');
  const fullCloud = row.projectionCloud || (wideProjection && fullSceneCache.get(sceneKey(row.frame)));
  const cloud = fullCloud || fcCloud(row);
  canvas.dataset.cloudDensity = fullCloud ? 'full' : cloud ? 'near' : 'empty';
- if (fullCloud) {
+ if (fullCloud && !slice) {
   drawFullProjection(ctx, canvas, g, pal, row, plane, fullCloud);
  } else if (cloud) {
   // During a drag, keep the cloud fixed and move only the cuboid overlay.
   const sampleBox = anchor;
   const sz = fc.cfg.pointSize;
-  const key = [g.cw, g.ch, g.k, g.cx, g.cy, fc.cfg.slice, sz, plane?.a, plane?.b, plane?.c].join('|');
+  const key = [g.cw, g.ch, g.k, g.cx, g.cy, fc.cfg.slice, sz, plane?.a, plane?.b, plane?.c,
+   slice?.axis, slice?.offset, slice?.width].join('|');
   let paths = projectionPaths.get(canvas);
   if (paths?.cloud !== cloud || paths?.anchor !== anchor || paths?.key !== key) {
    const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
@@ -9758,7 +9905,8 @@ function fcRenderView(row, canvas) {
     const ew = R[0][2] * ex + R[1][2] * ey + R[2][2] * ez;
     const isIn = Math.abs(eu) <= hl && Math.abs(ev) <= hw && Math.abs(ew) <= hh;
     if (isIn && view === 'top') nIn++;
-    if (!isIn && !fcPassSlice(view, eu, ev, ew, hl, hw, hh)) continue;
+    if (slice ? Math.abs((slice.axis === 0 ? eu : slice.axis === 1 ? ev : ew) - slice.offset) > slice.width / 2 :
+        (!isIn && !fcPassSlice(view, eu, ev, ew, hl, hw, hh))) continue;
     const [h, vert] = fcProject(view, ex * ac + ey * as, -ex * as + ey * ac, ez);
     const sx = g.cx + h * g.k, sy = g.cy - vert * g.k;
     if (sx < 0 || sy < 0 || sx > g.cw || sy > g.ch) continue;
@@ -9777,6 +9925,27 @@ function fcRenderView(row, canvas) {
   if (view === 'top') row.pointsIn = paths.nIn;
  }
 
+ workspaceDrawGround(ctx, row, toScreen, view);
+ workspaceDrawFace(ctx, row, toScreen);
+ const pick = fc.drag?.type === 'ground-region' && fc.drag.canvas === canvas ? fc.drag : null;
+ if (pick) {
+  const rect = canvas.getBoundingClientRect();
+  ctx.strokeStyle = FOOT_GROUND_COLOR;
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(pick.start[0] - rect.left, pick.start[1] - rect.top, pick.end[0] - pick.start[0], pick.end[1] - pick.start[1]);
+  ctx.setLineDash([]);
+ }
+ if (slice) {
+  ctx.fillStyle = pal.boxStroke;
+  ctx.font = '11px monospace';
+  ctx.fillText('Lát ' + canvas.dataset.slice, 8, g.ch - 8);
+ }
+ const groundPreview = workspaceGroundRow(row);
+ if (groundPreview?.changed && workspaceEvidence) {
+  const projected = fcBox2DFrame(row, view, g, groundPreview.after);
+  fcStrokePoly(ctx, [projected.pt(-1, 1), projected.pt(1, 1), projected.pt(1, -1), projected.pt(-1, -1)],
+   FOOT_GROUND_COLOR, 1.5, [4, 3]);
+ }
  // Box 2D chuẩn xác theo mặt cắt (không bị phình kép khi có cả Pitch & Roll) + 8 tay nắm (4 góc chéo + 4 cạnh)
  const bf = fcBox2DFrame(row, view, g, p);
  if (row.draft) {
@@ -9945,6 +10114,7 @@ function fcRowHTML(row) {
     <span class="cqt-fc-issue-dot" data-role="sync-dot" style="display:none;"></span>
     <span class="cqt-fc-issue-dot" data-role="limit-dot" style="display:none;"></span>
     <span class="cqt-fc-cloud-dot" data-role="cloud-dot" title="Trạng thái Point Cloud"></span>
+    <span class="cqt-label" data-role="review" hidden></span>
     <span class="cqt-badge" data-role="kf"></span>
    </div>
    <div class="cqt-fc-actions">
@@ -9999,14 +10169,12 @@ function fcRenderList() {
   const el = document.createElement('div');
   el.className = 'cqt-fc-row';
   el.dataset.frame = String(row.frame);
-  el.innerHTML = fcRowHTML(row);
   row.el = el;
   frag.appendChild(el);
  }
  list.appendChild(frag);
  fc.observer = new IntersectionObserver(fcOnIntersect, { root: list, rootMargin: '300px 0px' });
  for (const row of fc.rows) {
-  fcUpdateRowMeta(row);
   fc.observer.observe(row.el);
  }
  fcUpdateBars();
@@ -10020,14 +10188,11 @@ function fcOnIntersect(entries) {
   if (!row || row.el !== en.target) continue;
   row.visible = en.isIntersecting;
   if (row.visible) {
+   if (!row.el.firstElementChild) row.el.innerHTML = fcRowHTML(row);
+   fcUpdateRowMeta(row);
    fcSchedule([row]);
-  } else {
-   for (const c of en.target.querySelectorAll('canvas')) {
-    projectionLayers.delete(c);
-    projectionPaths.delete(c);
-    c.width = 0;
-    c.height = 0;
-   }
+  } else if (!row.el.contains(document.activeElement) && !fc.drag) {
+   row.el.replaceChildren();
   }
  }
  fcQueueVisibleDetail();
@@ -10035,12 +10200,19 @@ function fcOnIntersect(entries) {
 
 function fcUpdateRowMeta(row) {
  const el = row.el;
- if (!el) return;
+ if (!el?.firstElementChild) return;
  const p = fcPoints(row);
  const pr = fcGetPitchRoll(p);
  el.classList.toggle('selected', fc.selected.has(row.frame));
  el.classList.toggle('outside', !!row.outside);
  el.classList.toggle('current', row.frame === getFrame());
+ const review = el.querySelector('[data-role="review"]');
+ const state = workspaceReviewStatusCache.get(`${fc.targetId}:${row.frame}`);
+ if (review) {
+  review.textContent = state === 'Đã duyệt' ? '✓' : state === 'Cần duyệt lại' ? '!' : '';
+  review.title = state || '';
+  review.hidden = !review.textContent;
+ }
  const kf = el.querySelector('[data-role="kf"]');
  kf.textContent = row.outside ? 'OUT' : row.key ? 'KEY' : 'LERP';
  kf.hidden = fc.objectType === 'shape' && !row.outside;
@@ -10119,12 +10291,14 @@ function fcRefreshAll() {
 }
 
 function fcUpdateFocusNav() {
+ workspaceUpdateTimeline();
  const position = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
  $('cqt-fc-focus-label').textContent = position >= 0
   ? `F${fc.focusFrame} · ${position + 1}/${fc.filteredRows.length}` : '—';
  $('cqt-fc-focus-prev').disabled = position <= 0;
  $('cqt-fc-focus-next').disabled = position < 0 || position >= fc.filteredRows.length - 1;
  if (footGroundPreview?.fullControl && footGroundPreview.key !== footGroundSelectionKey(true)) clearFootGroundPreview();
+ if (workspaceFaceDraft && workspaceFaceDraft.frame !== workspaceContext().frame) workspaceClearFace();
  refreshGroundScanRing();
 }
 
@@ -10450,6 +10624,7 @@ function fcAutoScroll(y) {
 }
 
 function fcStartCanvasDrag(e, row, canvas) {
+ if (workspaceStartRegion(e, row, canvas)) return;
  const rect = canvas.getBoundingClientRect();
  const hit = fcHitTest(row, canvas, e.clientX - rect.left, e.clientY - rect.top, e);
  if (!hit) return fcSelectClick(row, e);
@@ -10792,7 +10967,10 @@ function fcDragMoveWindow(e) {
 function fcOnMouseMove(e) {
  const d = fc.drag;
  if (!d || d.dock) return; // kéo trên ô nhúng do 76-dock xử lý
- if (d.type === 'edit') fcDragEdit(e);
+ if (d.type === 'ground-region') {
+  d.end = [e.clientX, e.clientY];
+  fcSchedule([d.row], 'top');
+ } else if (d.type === 'edit') fcDragEdit(e);
  else if (d.type === 'orbit3d') fcDragOrbit3D(e);
  else if (d.type === 'pan3d') fcDragPan3D(e);
  else if (d.type === 'pan2d') fcDragPan2D(e);
@@ -10807,6 +10985,7 @@ async function fcOnMouseUp(e) {
  if (!d || d.dock) return;
  fc.drag = null;
  $('cqt-fc-list')?.classList.remove('is-frame-dragging');
+ if (d.type === 'ground-region') return workspaceFinishRegion(d, e);
  if (d.type === 'orbit3d' || d.type === 'pan3d') {
   if (!d.moved && e) fcSelectClick(d.row, e);
   else if (!d.singleRow) saveFcSettings({ camAz: fc.cfg.camAz, camEl: fc.cfg.camEl, camPan: fc.cfg.camPan });
@@ -10855,15 +11034,14 @@ function fcCancelDrag() {
 }
 
 // ---- Cửa sổ ----
-const FC_HTML = `
+function fullControlHTML() { return `
  ${['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'].map((dir) => `<div class="cqt-fc-resizer" data-dir="${dir}"></div>`).join('')}
  <div class="cqt-fc-header" id="cqt-fc-header">
  <div class="cqt-fc-head" id="cqt-fc-head" title="Kéo để di chuyển · Nhấp đúp để phóng to / thu nhỏ">
   <div class="cqt-fc-title">
    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
    <span>Full Control</span>
-   <span class="cqt-badge">v${VERSION}</span>
-   <button type="button" id="cqt-fc-toolbar-toggle" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Thanh công cụ" aria-expanded="false" aria-controls="cqt-fc-toolbar" title="Rê chuột hoặc bấm để mở thanh công cụ"><span>Thanh công cụ</span>${ICONS.chevronDown}</button>
+   <button type="button" id="cqt-fc-toolbar-toggle" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Thanh công cụ" aria-expanded="false" aria-controls="cqt-fc-toolbar" title="Bấm để mở thanh công cụ"><span>Thanh công cụ</span>${ICONS.chevronDown}</button>
    <button type="button" id="cqt-fc-toolbar-pin" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" aria-label="Ghim thanh công cụ" aria-pressed="false" aria-controls="cqt-fc-toolbar" title="Ghim thanh công cụ">${ICONS.pin}</button>
   </div>
   <div class="cqt-fc-head-tools">
@@ -10910,12 +11088,19 @@ const FC_HTML = `
  </div>
  <div id="cqt-fc-limits" hidden></div>
  <div class="cqt-fc-bar cqt-fc-tabs" role="tablist" aria-label="Nhóm công cụ Full Control">
-  <button type="button" class="cqt-tab active" role="tab" id="cqt-fc-tab-view" data-fc-toolbar-tab="view" aria-selected="true" aria-controls="cqt-fc-view-controls">Hiển thị</button>
-  <button type="button" class="cqt-tab" role="tab" id="cqt-fc-tab-track" data-fc-toolbar-tab="track" aria-selected="false" aria-controls="cqt-fc-track-controls" tabindex="-1">Frame &amp; Track</button>
-  <button type="button" class="cqt-tab" role="tab" id="cqt-fc-tab-ground" data-fc-toolbar-tab="ground" aria-selected="false" aria-controls="cqt-fc-ground-controls" tabindex="-1">Fit Ground</button>
+  ${Object.entries(workspaceTabs).map(([name, label]) =>
+   `<button type="button" role="tab" class="cqt-tab ${name === 'view' ? 'active' : ''}" id="cqt-fc-tab-${name}" data-fc-toolbar-tab="${name}" aria-selected="${name === 'view'}" aria-controls="cqt-fc-${name}-controls" tabindex="${name === 'view' ? 0 : -1}">${label}</button>`).join('')}
  </div>
+ ${['object', 'reference', 'qa'].map((name) =>
+  `<section id="cqt-fc-${name}-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-${name}" hidden>
+   <div class="cqt-fc-bar"><button class="cqt-btn cqt-btn-secondary cqt-sm" type="button" data-workspace-inspector="${name}">Mở ${workspaceTabs[name]}</button>
+   ${name === 'object' ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-pin-size">Chốt LWH</button>' : ''}
+   ${name === 'reference' ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-pin-reference">Ghim frame</button>' : ''}
+   ${name === 'qa' ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-mark-review">Đã duyệt</button><button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-next-issue">Vấn đề ›</button>' : ''}</div>
+  </section>`).join('')}
  <section id="cqt-fc-view-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-view">
  <div class="cqt-fc-bar">
+  <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-workspace-inspector="view">Lát cắt / Camera</button>
   <label class="cqt-fc-ctl" title="Chiều cao ưu tiên của khung trong mỗi frame">Cỡ hàng <input type="range" id="cqt-fc-rowh" min="100" max="360" step="10" /></label>
   <label class="cqt-fc-ctl" title="Phóng to hình chiếu (hoặc Alt/Ctrl + lăn chuột trên danh sách)">Zoom <input type="range" id="cqt-fc-zoom" min="0.5" max="4" step="0.1" /><span id="cqt-fc-zoom-val" class="cqt-label"></span></label>
   <label class="cqt-fc-ctl" title="Chỉnh cỡ điểm. Xem phím đã gán trong Cài đặt → Phím tắt.">Cỡ điểm <input type="range" id="cqt-fc-point-size" aria-label="Cỡ điểm" min="1" max="${FC_MAX_POINT_SIZE}" step="1" /></label>
@@ -10965,6 +11150,7 @@ const FC_HTML = `
 
  <section id="cqt-fc-track-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-track" hidden>
  <div class="cqt-fc-bar cqt-fc-batch">
+  <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-workspace-inspector="track">Sửa track</button>
   <span class="cqt-label"><b id="cqt-fc-selcount" style="color:var(--cqt-text);">0</b> frame đang chọn</span>
   <button id="cqt-fc-sel-all" class="cqt-btn cqt-btn-secondary cqt-sm" title="Chọn các frame khớp bộ lọc, kể cả khi đang xem một frame">Chọn frame đã lọc</button>
   <button id="cqt-fc-sel-none" class="cqt-btn cqt-btn-secondary cqt-sm">Bỏ chọn</button>
@@ -11016,6 +11202,7 @@ const FC_HTML = `
    <button type="button" id="cqt-fc-ground-apply" class="cqt-btn cqt-btn-primary cqt-sm" hidden>Áp dụng</button>
   </div>
   ${footGroundFields('cqt-fc-ground-')}
+  ${workspaceGroundControls(true)}
   <p id="cqt-fc-ground-origin-hint" class="cqt-hint" hidden>${LIDAR_ORIGIN_HINT}</p>
   <p id="cqt-fc-ground-scene-hint" class="cqt-hint" hidden>Ước lượng một mặt phẳng đất từ toàn bộ cloud của từng frame.</p>
   <div id="cqt-fc-ground-lidar-fields" class="cqt-row cqt-wrap cqt-ground-controls" hidden>
@@ -11037,15 +11224,27 @@ const FC_HTML = `
  </div>
  <div class="cqt-fc-list" id="cqt-fc-list"></div>
  </div>
+ <div id="cqt-fc-context" class="cqt-row cqt-fc-context">
+  <button type="button" id="cqt-fc-context-prev" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame trước">‹</button>
+  <span id="cqt-fc-context-frame" class="cqt-label"></span>
+  <input id="cqt-fc-context-slider" type="range" min="0" max="0" value="0" aria-label="Timeline object">
+  <button type="button" id="cqt-fc-context-next" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame sau">›</button>
+  <span id="cqt-fc-context-scope" class="cqt-label"></span>
+  <span id="cqt-fc-review-state" class="cqt-label"></span>
+  <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-workspace-inspector="qa">Review</button>
+  <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-workspace-inspector="settings" aria-label="Cài đặt Toolbox">${ICONS.sliders}</button>
+ </div>
  <div class="cqt-fc-footer">
   <div id="cqt-fc-status" class="cqt-fc-status">Sẵn sàng.</div>
+  <span id="cqt-fc-save-state" class="cqt-label"></span>
+  <button type="button" id="cqt-fc-save" class="cqt-btn cqt-btn-secondary cqt-sm">Save CVAT</button>
   <div id="cqt-fc-cloud-progress" hidden>
    <div class="cqt-fc-progress" title="Tiến trình nạp point cloud"><div id="cqt-fc-progress-bar"></div></div>
    <span id="cqt-fc-progress-text" class="cqt-label">0%</span>
    <button id="cqt-fc-stop" class="cqt-btn cqt-btn-danger cqt-sm cqt-none" title="Dừng quét cloud (giữ phần đã nạp)">Dừng</button>
   </div>
  </div>
-`;
+`; }
 
 function fcApplyBounds() {
  const el = fc.el, b = fc.cfg;
@@ -11192,7 +11391,7 @@ function fcSetToolbar(open) {
  if (!open && toolbar.contains(document.activeElement)) toggle.focus({ preventScroll: true });
  toolbar.hidden = !open;
  toggle.setAttribute('aria-expanded', String(open));
- toggle.title = open ? 'Thu thanh công cụ' : 'Rê chuột hoặc bấm để mở thanh công cụ';
+ toggle.title = open ? 'Thu thanh công cụ' : 'Bấm để mở thanh công cụ';
  pin.setAttribute('aria-pressed', String(pinned));
  pin.title = pinned ? 'Bỏ ghim để tự thu khi rời chuột' : 'Ghim thanh công cụ để giữ mở';
 }
@@ -11221,14 +11420,6 @@ function fcBindWindow(el) {
  const head = el.querySelector('#cqt-fc-head');
  const header = el.querySelector('#cqt-fc-header');
  const toolbar = el.querySelector('#cqt-fc-toolbar');
- const toggle = el.querySelector('#cqt-fc-toolbar-toggle');
- toggle.addEventListener('pointerenter', (e) => {
-  if (e.pointerType === 'touch' || e.buttons || !toolbar.hidden) return;
-  clearTimeout(fc.toolbarTimer);
-  fc.toolbarTimer = setTimeout(() => {
-   if (toggle.matches(':hover') && !fc.drag) fcSetToolbar(true);
-  }, 140);
- });
  header.addEventListener('pointerenter', () => clearTimeout(fc.toolbarTimer));
  header.addEventListener('pointerleave', (e) => {
   if (e.pointerType !== 'touch') fcQueueToolbarCollapse();
@@ -11284,6 +11475,20 @@ function fcBindWindow(el) {
  on('cqt-fc-qc', () => openQCWorkspace());
  on('cqt-fc-focus-prev', () => fcStepFocus(-1));
  on('cqt-fc-focus-next', () => fcStepFocus(1));
+ on('cqt-fc-pin-size', () => {
+  const { id, frame } = workspaceContext();
+  return fetchLWH(id, frame);
+ });
+ on('cqt-fc-pin-reference', workspacePin);
+ on('cqt-fc-mark-review', workspaceMarkReviewed);
+ on('cqt-fc-next-issue', () => workspaceIssueStep(1));
+ on('cqt-fc-context-prev', () => fcStepFocus(-1));
+ on('cqt-fc-context-next', () => fcStepFocus(1));
+ on('cqt-fc-context-slider', (e) => workspaceGo(fc.targetId, fc.filteredRows[e.target.valueAsNumber]?.frame), 'change');
+ on('cqt-ground-roi-fc', () => workspaceGroundRegion(true));
+ on('cqt-ground-clear-fc', () => workspaceSetRegion(null));
+ el.querySelectorAll('[data-workspace-inspector]').forEach((button) =>
+  button.addEventListener('click', guarded(() => workspaceOpen(button.dataset.workspaceInspector))));
  el.querySelectorAll('[data-fc-layout]').forEach((button) =>
   button.addEventListener('click', () => fcSetLayout(button.dataset.fcLayout)));
  const tabs = [...el.querySelectorAll('[data-fc-toolbar-tab]')];
@@ -11309,6 +11514,10 @@ function fcBindWindow(el) {
  on('cqt-fc-target', (e) => updateObjectIdValidity(e.target), 'input');
  on('cqt-fc-target', (e) => (e.key === 'Enter' ? fcLoadObject() : null), 'keydown');
  on('cqt-fc-rescan', () => fcHarvest(true));
+ on('cqt-fc-save', () => {
+  if (isToolBusy() || fc.drag || groundFitting) return fail('Đợi thao tác hiện tại trước khi lưu.');
+  document.querySelector('button.cvat-annotation-header-save-button')?.click();
+ });
  on('cqt-fc-safedata', () => {
   setSafeData(!safeData());
   fcQueueVisibleDetail();
@@ -11570,6 +11779,7 @@ function fcBindWindow(el) {
   fcSchedule([row], view);
  });
  list.addEventListener('wheel', (e) => {
+  if (workspaceWheelSlice(e)) return;
   const canvas = e.target.closest?.('canvas[data-view]');
   const modified = e.altKey || e.ctrlKey || e.metaKey;
   const view = canvas?.dataset.view;
@@ -11671,7 +11881,7 @@ function fcEnsureWindow() {
  if (fc.el && root.contains(fc.el)) return fc.el;
  const el = document.createElement('div');
  el.id = 'cqt-fc-window';
- el.innerHTML = FC_HTML;
+ el.innerHTML = fullControlHTML();
  root.appendChild(el);
  fc.el = el;
  syncShortcutHints();
@@ -11845,6 +12055,7 @@ function dockBindView(e, view) {
   }
  }));
  box.addEventListener('wheel', (ev) => {
+  if (workspaceWheelSlice(ev)) return;
   ev.preventDefault();
   ev.stopPropagation();
   if (ev.ctrlKey || ev.altKey || ev.metaKey) {
@@ -11868,6 +12079,7 @@ function dockBindView(e, view) {
  canvas.addEventListener('mousedown', (ev) => {
   const row = dock.row;
   if (!row || row.outside || fc.drag) return;
+  if (workspaceStartRegion(ev, row, canvas)) return;
   const rect = canvas.getBoundingClientRect();
   const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
   const isPan = ev.button === 1 || ev.button === 2 || (ev.button === 0 && (ev.shiftKey || ev.spaceKey));
@@ -12197,15 +12409,17 @@ function scheduleDockRender() {
 function dockOnMouseMove(e) {
  const d = fc.drag;
  if (!d?.dock) return;
- if (d.type === 'edit') fcDragEdit(e);
+ if (d.type === 'ground-region') d.end = [e.clientX, e.clientY];
+ else if (d.type === 'edit') fcDragEdit(e);
  else if (d.type === 'pan2d') fcDragPan2D(e);
  scheduleDockRender();
 }
 
-async function dockOnMouseUp() {
+async function dockOnMouseUp(e) {
  const d = fc.drag;
  if (!d?.dock) return;
  fc.drag = null;
+ if (d.type === 'ground-region') return workspaceFinishRegion(d, e);
  if (d.type === 'pan2d') {
   return dockRender();
  }
@@ -13735,10 +13949,12 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
 <!-- Segmented Tabs (shadcn TabsList) -->
 <div class="cqt-tabs-wrap">
 <div class="cqt-tabs">
+<button class="cqt-tab" data-tab="view">Hiển thị</button>
 <button class="cqt-tab active" data-tab="object">Box</button>
 <button class="cqt-tab" data-tab="ground">Ground</button>
 <button class="cqt-tab" data-tab="track">Track</button>
-<button class="cqt-tab" data-tab="qa">QA</button>
+<button class="cqt-tab" data-tab="reference">Tham chiếu</button>
+<button class="cqt-tab" data-tab="qa">Review</button>
 <button class="cqt-tab cqt-tab-icon" data-tab="settings" title="Cài đặt tính năng, phím tắt & Limits LWH">
 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
 </button>
@@ -13747,6 +13963,19 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
 <div id="cvat-quicktool-body">
 <!-- ================= 1. BOX (LWH, ANCHOR RESIZE, MICRO-NUDGE, SUB-LABEL) ================= -->
 <div class="cqt-pane active" data-pane="object">
+<details class="cqt-card cqt-disclosure" id="cqt-face-section">
+ <summary>Chỉnh từng mặt cuboid</summary>
+ <div class="cqt-row cqt-wrap">
+  <label class="cqt-col"><span class="cqt-label">Mặt</span><select id="cqt-face" class="cqt-input">
+   <option value="0:1">Đầu</option><option value="0:-1">Đuôi</option><option value="1:1">Trái</option>
+   <option value="1:-1">Phải</option><option value="2:1">Nóc</option><option value="2:-1">Đáy</option>
+  </select></label>
+  <label class="cqt-col"><span class="cqt-label">Dịch mặt (m)</span><input id="cqt-face-delta" class="cqt-input" type="number" step="0.01" value="0.05"></label>
+ </div>
+ <label class="cqt-check"><input id="cqt-face-sym" type="checkbox"> Đối xứng qua tâm</label>
+ <div class="cqt-row cqt-wrap"><button type="button" id="cqt-face-show" class="cqt-btn cqt-btn-secondary cqt-sm">Xem trước</button><button type="button" id="cqt-face-apply" class="cqt-btn cqt-btn-primary cqt-sm">Áp dụng</button><button type="button" id="cqt-face-cancel" class="cqt-btn cqt-btn-secondary cqt-sm">Hủy</button></div>
+ <small id="cqt-face-preview" role="status"></small>
+</details>
 <!-- Cụm 1: Smart Snap & Clipboard -->
 <div class="cqt-card">
 <div class="cqt-row">
@@ -13841,6 +14070,7 @@ ${groundFitSelect('cqt-ground-direction', 'Hướng', GROUND_FIT_DIRECTIONS)}
 <button type="button" id="cqt-btn-ground-measure" class="cqt-btn cqt-btn-secondary" title="Đo theo nguồn và phạm vi đã chọn">Đo đáy</button>
 </div>
 ${footGroundFields('cqt-ground-')}
+${workspaceGroundControls(false)}
 <p id="cqt-ground-origin-hint" class="cqt-hint" hidden>${LIDAR_ORIGIN_HINT}</p>
 <p id="cqt-ground-scene-hint" class="cqt-hint" hidden>Ước lượng một mặt phẳng đất từ toàn bộ cloud của từng frame.</p>
 <details id="cqt-ground-lidar-fields" class="cqt-disclosure" hidden>
@@ -13894,6 +14124,23 @@ ${lidarGroundFields()}
 </div>
 <!-- ================= 3. TRACK (HƯỚNG + KEYFRAME/OUTSIDE + NỘI SUY + DỊCH) ================= -->
 <div class="cqt-pane" data-pane="track">
+<details class="cqt-card cqt-disclosure" id="cqt-track-repair">
+ <summary>Sửa track</summary>
+ <div class="cqt-row cqt-wrap">
+  <label class="cqt-col"><span class="cqt-label">Thao tác</span><select id="cqt-repair-kind" class="cqt-input">
+   <option value="join">Nối vào danh tính A</option><option value="split">Tách từ frame</option><option value="swap">Hoán đổi đoạn A và B</option>
+  </select></label>
+  <label class="cqt-col"><span class="cqt-label">Object B</span><input id="cqt-repair-b" class="cqt-input" type="number" min="1" step="1"></label>
+ </div>
+ <div class="cqt-row cqt-wrap">
+  <label class="cqt-col"><span class="cqt-label">Từ F</span><input id="cqt-repair-from" class="cqt-input" type="number" min="0" step="1"></label>
+  <label class="cqt-col"><span class="cqt-label">Đến F</span><input id="cqt-repair-to" class="cqt-input" type="number" min="0" step="1"></label>
+ </div>
+ <div class="cqt-row cqt-wrap"><button type="button" id="cqt-repair-show" class="cqt-btn cqt-btn-secondary cqt-sm">Xem trước</button><button type="button" id="cqt-repair-apply" class="cqt-btn cqt-btn-primary cqt-sm">Áp dụng</button></div>
+ <div class="cqt-row cqt-wrap"><button type="button" id="cqt-repair-suggest" class="cqt-btn cqt-btn-secondary cqt-sm">Gợi ý track B</button><div id="cqt-repair-candidates" class="cqt-row cqt-wrap"></div></div>
+ <p id="cqt-repair-result" class="cqt-workspace-result" role="status"></p>
+ <div id="cqt-repair-compare" class="cqt-compare-grid"></div>
+</details>
 <label class="cqt-check"><input type="checkbox" id="cqt-track-keyframe-only" checked /> Chỉ sửa keyframe trong dải (frame nội suy tự theo)</label>
 <!-- Cụm 0: Snap cả sequence -->
 <div class="cqt-card">
@@ -14043,7 +14290,48 @@ ${lidarGroundFields()}
 </details>
 </div>
 <!-- ================= 4. QA (COLLAPSIBLE + 2-COLUMN GRID) ================= -->
+<div class="cqt-pane" data-pane="view">
+ <div class="cqt-card">
+  <div class="cqt-row cqt-wrap"><button type="button" id="cqt-view-projection" class="cqt-btn cqt-btn-secondary cqt-sm">Góc CVAT / Tool</button><button type="button" id="cqt-view-focus" class="cqt-btn cqt-btn-secondary cqt-sm">Focus</button></div>
+  <label class="cqt-check"><input id="cqt-slice-enable" type="checkbox"> Cuộn để quét lát</label>
+  <div class="cqt-row cqt-wrap">
+   <label class="cqt-col"><span class="cqt-label">Trục local</span><select id="cqt-slice-axis" class="cqt-input"><option value="0">X · Dọc</option><option value="1" selected>Y · Ngang</option><option value="2">Z · Cao</option></select></label>
+   <label class="cqt-col"><span class="cqt-label">Vị trí (m)</span><input type="number" id="cqt-slice-offset" class="cqt-input" step="0.05" value="0"></label>
+   <label class="cqt-col"><span class="cqt-label">Độ dày (m)</span><input type="number" id="cqt-slice-width" class="cqt-input" min="0.02" max="2" step="0.01" value="0.2"></label>
+  </div>
+  <span class="cqt-hint">Lát cắt áp dụng trên Top, Side và Front của Tool.</span>
+ </div>
+</div>
+<div class="cqt-pane" data-pane="reference">
+ <div class="cqt-card">
+  <span id="cqt-ref-status" role="status"></span>
+  <div class="cqt-row cqt-wrap"><button type="button" id="cqt-ref-pin" class="cqt-btn cqt-btn-primary cqt-sm">Ghim frame</button><button type="button" id="cqt-ref-suggest" class="cqt-btn cqt-btn-secondary cqt-sm">Gợi ý frame</button></div>
+  <label class="cqt-col"><span class="cqt-label">Frame chuẩn</span><select id="cqt-ref-pins" class="cqt-input"></select></label>
+  <label class="cqt-col"><span class="cqt-label">Góc nhìn</span><select id="cqt-ref-view" class="cqt-input"><option value="side">Side</option><option value="top">Top</option><option value="front">Front</option></select></label>
+  <div class="cqt-row cqt-wrap"><button type="button" id="cqt-ref-compare" class="cqt-btn cqt-btn-secondary cqt-sm">So sánh</button><button type="button" id="cqt-ref-use" class="cqt-btn cqt-btn-secondary cqt-sm">Chốt LWH</button><button type="button" id="cqt-ref-overlay" class="cqt-btn cqt-btn-secondary cqt-sm">Chồng điểm</button></div>
+  <div id="cqt-ref-suggestions" class="cqt-row cqt-wrap"></div>
+  <div id="cqt-ref-output" class="cqt-compare-grid"></div>
+ </div>
+</div>
 <div class="cqt-pane" data-pane="qa">
+<div class="cqt-card">
+ <span id="cqt-workspace-review-state" role="status"></span>
+ <div class="cqt-row cqt-wrap">
+  <label class="cqt-col">Đối tượng quét<select id="cqt-review-scope" class="cqt-input"><option value="all">Tất cả</option><option value="object">Object đang xem</option><option value="group">Nhóm đang chọn</option></select></label>
+  <button type="button" id="cqt-review-stop" class="cqt-btn cqt-btn-secondary cqt-sm">Dừng quét</button>
+ </div>
+ <div class="cqt-row cqt-wrap">
+  <label class="cqt-check"><input type="checkbox" id="cqt-review-motion"> Kiểm tra tâm nhảy</label>
+  <label class="cqt-check"><input type="checkbox" id="cqt-review-support"> Kiểm tra điểm trong cloud đã nạp</label>
+  <label class="cqt-col">Ngưỡng (m/frame)<input type="number" id="cqt-review-motion-threshold" class="cqt-input" min="0.1" step="0.1" value="3"></label>
+ </div>
+ <div class="cqt-row cqt-wrap"><button type="button" id="cqt-workspace-reviewed" class="cqt-btn cqt-btn-primary cqt-sm">Đã duyệt frame</button><button type="button" id="cqt-workspace-history-open" class="cqt-btn cqt-btn-secondary cqt-sm">Lịch sử</button></div>
+ <div class="cqt-row cqt-wrap"><button type="button" id="cqt-workspace-issue-prev" class="cqt-btn cqt-btn-secondary cqt-sm">‹ Vấn đề</button><button type="button" id="cqt-workspace-issue-next" class="cqt-btn cqt-btn-secondary cqt-sm">Vấn đề ›</button><button type="button" id="cqt-workspace-issue-ok" class="cqt-btn cqt-btn-secondary cqt-sm">Đúng thực tế</button><button type="button" id="cqt-workspace-issue-later" class="cqt-btn cqt-btn-secondary cqt-sm">Để sau</button></div>
+ <details class="cqt-disclosure" id="cqt-workspace-issue-list"><summary id="cqt-workspace-issues-summary">Frame cần xem lại</summary><div id="cqt-workspace-issues"></div></details>
+ <p id="cqt-workspace-issue" role="status"></p>
+ <div id="cqt-workspace-compare" class="cqt-compare-grid"></div>
+ <div id="cqt-workspace-history" hidden></div>
+</div>
 <details id="cqt-qa-details" class="cqt-collapsible">
 <summary>
 <span>Tiêu chí kiểm tra QA</span>
@@ -14104,6 +14392,7 @@ ${lidarGroundFields()}
 </div>
 <!-- ================= 5. CÀI ĐẶT & PHÍM TẮT ================= -->
 <div class="cqt-pane" data-pane="settings">
+<div class="cqt-label">Cuboid Toolbox v${VERSION}</div>
 <div class="cqt-card">
 <span class="cqt-h">Tuỳ chọn Tính năng (On / Off)</span>
 <label class="cqt-check" title="Bật giao diện Sáng (Light Mode) với viền và chữ tương phản cao"><input type="checkbox" id="cqt-set-light-theme" /> Giao diện Sáng (Light Mode)</label>
@@ -14118,6 +14407,14 @@ ${lidarGroundFields()}
 <label class="cqt-check" title="Dùng khi canvas không tự cập nhật sau khi sửa"><input type="checkbox" id="cqt-set-bounce" /> Làm mới canvas bằng chuyển frame (dự phòng)</label>
 </div>
 ${shortcutSettingsHTML()}
+<details class="cqt-card cqt-disclosure">
+ <summary>Dữ liệu review</summary>
+ <label class="cqt-check"><input id="cqt-review-local" type="checkbox"> Lưu tiến độ trên trình duyệt</label>
+ <small id="cqt-review-local-status" role="status"></small>
+ <div class="cqt-row cqt-wrap"><button type="button" id="cqt-review-export" class="cqt-btn cqt-btn-secondary cqt-sm">Xuất review</button>
+  <label class="cqt-col"><span class="cqt-label">Nhập gói review</span><input id="cqt-review-import" class="cqt-input" type="file" accept=".json,application/json"></label>
+ </div>
+</details>
 <div id="cqt-limit-home"><div id="cqt-limit-editor" class="cqt-card">
 <span class="cqt-h">Limit kích thước theo class (m)</span>
 <div class="cqt-limit-class-fields">
@@ -14283,6 +14580,1159 @@ function createUI() {
  syncActiveObjectQuiet();
 }
 
+
+// Workspace tools share the same object/frame context in Toolbox and Full Control.
+const workspacePins = new Map();
+const workspaceRepairHistory = [];
+const workspaceReviewStatusCache = new Map();
+let workspaceCompareSelection = null;
+let workspaceCompareTimer = 0;
+let workspaceLastCompareFrame = null;
+const workspaceReviews = new Map();
+let workspaceRevision = 0;
+let workspaceReviewRequest = 0;
+let workspaceWasSaving = false;
+let workspaceIssueIndex = -1;
+let workspaceScanCancelled = false;
+let workspaceTrackDraft = null;
+let workspaceFaceDraft = null;
+let workspaceSlice = null;
+let workspaceRegion = null;
+let workspaceRegionPicking = null;
+let workspaceEvidence = true;
+const workspaceTabs = { view: 'Hiển thị', object: 'Box', ground: 'Ground', track: 'Track', reference: 'Tham chiếu', qa: 'Review' };
+
+function workspaceContext() {
+ const frame = fc.open ? (fcLayout() === 'table' ? (fc.lastClicked ?? fc.focusFrame ?? getFrame()) : (fc.focusFrame ?? getFrame())) : getFrame();
+ return { id: fc.open ? fc.targetId : resolveTargetId(), frame };
+}
+
+async function workspaceOpen(tab) {
+ if (stealthUI) togglePanel();
+ if (fc.open && Number.isInteger(fc.targetId)) {
+  const { id, frame } = workspaceContext();
+  if (Number.isInteger(frame) && getFrame() !== frame && !(await goToFrame(frame))) return fail(`Không mở được F${frame}.`);
+  if (!fc.open || workspaceContext().id !== id || workspaceContext().frame !== frame) return;
+  await jumpTo(id, frame);
+  setField('cqt-target-id', id);
+ }
+ if (fc.open && !fc.toolsOpen) {
+  fc.previousSidebarState = panelApi?.getState() || 'collapsed';
+  fc.toolsOpen = true;
+  root.classList.add('cqt-fc-tools-open');
+  $('cqt-fc-tools').setAttribute('aria-pressed', 'true');
+ }
+ panelApi?.setState('pinned');
+ openToolboxTab(tab);
+}
+
+async function workspaceStates(multiple = false) {
+ const { id, frame } = workspaceContext();
+ if (!Number.isInteger(id) || !Number.isInteger(frame)) return [];
+ const selected = multiple && fc.open ? fcSelectedRows().map((row) => row.frame) : [];
+ const result = [];
+ for (const f of selected.length ? selected : [frame]) {
+  const state = await getState(id, f, true);
+  if (scope.signal.aborted || workspaceContext().id !== id || workspaceContext().frame !== frame) return [];
+  if (isCuboid(state) && !state.outside) result.push(state);
+ }
+ return result;
+}
+
+function workspaceIdentity(state) {
+ return `${state.objectType}:${state.serverID != null ? state.serverID : 'tmp-' + state.clientID}:${state.frame}`;
+}
+
+function workspaceReviewFor(state) {
+ const key = workspaceIdentity(state);
+ const pendingKey = `${state.objectType}:tmp-${state.clientID}:${state.frame}`;
+ const fingerprint = annotationFingerprint(state);
+ const record = workspaceReviews.get(key) ?? workspaceReviews.get(pendingKey);
+ if (record && key !== pendingKey && !workspaceReviews.has(key)) {
+  workspaceReviews.set(key, record);
+  workspaceReviews.delete(pendingKey);
+ }
+ const label = !record ? 'Chưa duyệt' : record.fingerprint === fingerprint ? 'Đã duyệt' : 'Cần duyệt lại';
+ workspaceReviewStatusCache.set(`${state.clientID}:${state.frame}`, label);
+ return label;
+}
+
+async function workspaceReviewStatus(multiple = false) {
+ const output = $('cqt-workspace-review-state');
+ if (!output?.getClientRects().length && !$('cqt-fc-review-state')?.getClientRects().length) return;
+ const request = ++workspaceReviewRequest;
+ const states = await workspaceStates(multiple);
+ if (scope.signal.aborted || request !== workspaceReviewRequest) return;
+ const counts = new Map();
+ for (const state of states) {
+  const label = workspaceReviewFor(state);
+  counts.set(label, (counts.get(label) || 0) + 1);
+ }
+ for (const state of states) {
+  const row = fcRowByFrame(state.frame);
+  if (row?.el && fc.targetId === state.clientID) fcUpdateRowMeta(row);
+ }
+ const label = states.length ? [...counts].map(([status, count]) => `${status} · ${count} F`).join(' / ') : 'Chọn cuboid để duyệt';
+ output.textContent = label;
+ const badge = $('cqt-fc-review-state');
+ if (badge) badge.textContent = states.length ? label : '';
+ const progress = $('cqt-review-local-status');
+ if (progress) progress.textContent = !safeData() && isChecked('cqt-review-local')
+  ? 'Lưu metadata trên trình duyệt này' : 'Metadata trong phiên';
+}
+
+async function workspaceMarkReviewed() {
+ const states = await workspaceStates(true);
+ if (!states.length) return fail('Chọn frame có cuboid trước khi duyệt.');
+ for (const state of states) {
+  workspaceReviews.set(workspaceIdentity(state), { fingerprint: annotationFingerprint(state), at: Date.now() });
+ }
+ const persisted = await workspaceSaveReview();
+ await workspaceReviewStatus(true);
+ setStatus(`Đã ghi nhận duyệt #${states[0].clientID} · ${states.length} frame.${persisted === false ? ' · Lưu trong phiên.' : ''}`, persisted === false ? 'warn' : 'success');
+}
+
+const reviewStorageKey = () => `cqt-review-v1:${job.taskId}:${job.id}`;
+let reviewStorageVersion = null;
+
+function workspaceReviewPacket() {
+ return {
+  schemaVersion: 1,
+  origin: location.origin,
+  task: job.taskId,
+  job: job.id,
+  revision: crypto.randomUUID(),
+  records: [...workspaceReviews].filter(([key]) => !key.includes(':tmp-')),
+ };
+}
+
+function workspaceReadPacket(data) {
+ if (data?.schemaVersion !== 1 || data.origin !== location.origin || data.job !== job.id ||
+     data.task !== job.taskId || typeof data.revision !== 'string' ||
+     !Array.isArray(data.records) || data.records.length > 50000) {
+  throw new Error('Gói review sai job, phiên bản hoặc vượt giới hạn.');
+ }
+ const records = [];
+ for (const item of data.records) {
+  if (!Array.isArray(item) || item.length !== 2) throw new Error('Mục review không hợp lệ.');
+  const [key, value] = item;
+  if (typeof key !== 'string' || !/^(track|shape):\d{1,15}:\d{1,9}$/.test(key) ||
+      typeof value?.fingerprint !== 'string' || !/^\d{1,9}:\d{1,10}:\d{1,10}$/.test(value.fingerprint) ||
+      !Number.isFinite(value.at) || value.at < 0 || value.at > Date.now() + 86400000) throw new Error('Mục review không hợp lệ.');
+  records.push([key, { fingerprint: value.fingerprint, at: value.at }]);
+ }
+ return records;
+}
+
+function workspaceReviewDB() {
+ return new Promise((resolve, reject) => {
+  const request = indexedDB.open('cvat-cuboid-toolbox-review', 1);
+  request.onupgradeneeded = () => request.result.createObjectStore('jobs');
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error);
+  request.onblocked = () => reject(new Error('Kho review đang được mở ở tab khác.'));
+ });
+}
+
+async function workspaceReviewTransaction(mode, write) {
+ const db = await workspaceReviewDB();
+ try {
+  return await new Promise((resolve, reject) => {
+   const tx = db.transaction('jobs', mode);
+   const items = tx.objectStore('jobs');
+   const request = items.get(reviewStorageKey());
+   let result, failure;
+   request.onsuccess = () => {
+    try { result = write(items, request.result); }
+    catch (error) { failure = error; tx.abort(); }
+   };
+   tx.oncomplete = () => resolve(result);
+   tx.onabort = tx.onerror = () => reject(failure || tx.error || new Error('Không đọc được tiến độ review.'));
+  });
+ } finally { db.close(); }
+}
+
+async function workspaceLoadReview() {
+ if (safeData() || !isChecked('cqt-review-local')) return;
+ await workspaceReviewTransaction('readonly', (_, packet) => {
+  if (scope.signal.aborted || safeData() || !isChecked('cqt-review-local')) return;
+  reviewStorageVersion = packet?.revision ?? null;
+  if (packet) {
+   for (const [key, record] of workspaceReadPacket(packet)) {
+    if (!workspaceReviews.has(key)) workspaceReviews.set(key, record);
+   }
+  }
+ });
+ await workspaceReviewStatus();
+}
+
+async function workspaceSaveReview() {
+ if (safeData() || !isChecked('cqt-review-local')) return;
+ try {
+  await workspaceReviewTransaction('readwrite', (items, before) => {
+   if (scope.signal.aborted || safeData() || !isChecked('cqt-review-local')) return;
+   if ((before?.revision ?? null) !== reviewStorageVersion) throw new Error('Tab khác đã lưu review. Tải lại để hợp nhất.');
+   const next = workspaceReviewPacket();
+   items.put(next, reviewStorageKey());
+   reviewStorageVersion = next.revision;
+  });
+ } catch (error) {
+  $('cqt-review-local').checked = false;
+  lsSet(LS.settings, { ...getSettings(), localReview: false });
+  fail(`${error.message} · Giữ review trong phiên.`);
+  return false;
+ }
+ return true;
+}
+
+function workspaceExportReview() {
+ if (safeData()) return fail('Tắt Chế độ an toàn dữ liệu để xuất gói review.');
+ const packet = workspaceReviewPacket();
+ if (!packet.records.length) return fail('Chưa có review của object đã Save.');
+ const url = URL.createObjectURL(new Blob([JSON.stringify(packet)], { type: 'application/json' }));
+ const link = document.createElement('a');
+ link.href = url;
+ link.download = `review-job-${job.id}.json`;
+ link.click();
+ setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function workspaceImportReview(file) {
+ if (!file || safeData()) return;
+ if (file.size > 5 * 1024 * 1024) return fail('Gói review vượt 5 MiB.');
+ const records = workspaceReadPacket(JSON.parse(await file.text()));
+ if (scope.signal.aborted) return;
+ for (const [key, record] of records) {
+  const current = workspaceReviews.get(key);
+  if (!current || current.at < record.at) workspaceReviews.set(key, record);
+ }
+ await workspaceSaveReview();
+ await workspaceReviewStatus();
+ setStatus(`Đã nhận ${records.length} mục review. Đối chiếu fingerprint khi mở frame.`, 'success');
+}
+
+function workspaceHistory() {
+ const box = $('cqt-workspace-history');
+ const native = annotationState()?.annotations.history;
+ const entries = [...snapshots.filter((entry) => entry.jobId === job.id), ...workspaceRepairHistory]
+  .sort((a, b) => b.ts - a.ts);
+ box.replaceChildren();
+ for (const entry of entries) {
+  const detail = document.createElement('details');
+  const title = document.createElement('summary');
+  title.textContent = `${entry.label} · ${new Date(entry.ts).toLocaleTimeString()}`;
+  if (entry.items.length) {
+   const changed = entry.items.filter((item) => item.after);
+   const min = Math.min(...entry.items.map((item) => item.affectedFrom));
+   const max = Math.max(...entry.items.map((item) => item.affectedTo));
+   title.textContent += ` · ${changed.length}/${entry.items.length} mục · kiểm tra đoạn F${min}–F${max}`;
+  }
+  detail.append(title);
+  for (const item of entry.items.slice(0, 30)) {
+   const line = document.createElement('div');
+   const values = (p) => p.slice(0, 9).map((x) => Number(x).toFixed(3)).join(' / ');
+   line.textContent = `#${item.clientID} · F${item.frame} · ${values(item.points)}` +
+    (item.after ? ' → ' + values(item.after.points) :
+     item.detail ? ' · ' + item.detail : '');
+   if (item.after && item.outside !== item.after.outside) line.textContent += item.after.outside ? ' · Outside' : ' · Inside';
+   if (item.after && item.occluded !== item.after.occluded) line.textContent += ` · Occlusion ${item.after.occluded ? 'bật' : 'tắt'}`;
+   for (const [key, value] of Object.entries(item.after?.attributes || {})) {
+    if (item.attributes?.[key] !== value) line.textContent += ` · Thuộc tính #${key}: ${item.attributes?.[key] ?? '—'} → ${value}`;
+   }
+   detail.append(line);
+  }
+  if (entry.items.length > 30) detail.append(`… ${entry.items.length - 30} mục khác`);
+  box.append(detail);
+ }
+ const note = document.createElement('p');
+ note.className = 'cqt-label';
+ note.textContent = `CVAT · ${native?.undo?.at(-1)?.[0] ?? 'Chưa có thao tác để hoàn tác'} · Dùng Undo/Redo của CVAT cho sửa cấu trúc track.`;
+ const buttons = document.createElement('div');
+ buttons.className = 'cqt-row cqt-wrap';
+ for (const [method, label] of [['undo', 'Undo CVAT'], ['redo', 'Redo CVAT']]) {
+  const button = workspaceText(buttons, 'button', label, 'cqt-btn cqt-btn-secondary cqt-sm');
+  button.disabled = !native?.[method]?.length;
+  button.addEventListener('click', guarded(() => workspaceNativeHistory(method)));
+ }
+ box.prepend(note, buttons);
+}
+
+async function workspaceNativeHistory(method) {
+ if (isToolBusy() || annotationState()?.annotations.saving.uploading) return fail('Đợi thao tác đang chạy hoàn tất.');
+ const busy = beginBusy(method + ' CVAT');
+ try {
+  const affected = await job.actions[method]();
+  workspaceRevision++;
+  invalidateQC();
+  await refreshView();
+  if (fc.open) {
+   const states = await getStates(workspaceContext().frame);
+   const next = states.find((s) => affected.includes(s.clientID) && isCuboid(s) && !s.outside);
+   if (next && !states.some((s) => s.clientID === fc.targetId)) {
+    await fcLoadObject(next.clientID);
+    await workspaceOpen('qa');
+   } else await fcReloadStates();
+  }
+  workspaceHistory();
+  setStatus(method === 'undo' ? 'Đã hoàn tác CVAT.' : 'Đã làm lại CVAT.', 'success');
+ } finally { endBusy(busy); }
+}
+
+async function workspaceGo(id, frame) {
+ if (!Number.isInteger(frame)) return;
+ if (!fc.open) return jumpTo(id, frame);
+ if (fc.targetId !== id) {
+  if (!(await goToFrame(frame))) return;
+  await fcLoadObject(id);
+ }
+ const row = fcRowByFrame(frame);
+ if (!row) return fail(`Không có cuboid #${id} ở F${frame}.`);
+ if (!fc.filteredRows.includes(row)) {
+  saveFcSettings({ filter: 'all' });
+  fcRenderList();
+ }
+ fc.focusFrame = frame;
+ fc.lastClicked = frame;
+ fcScrollToFocus(row);
+ if (fc.cfg.live3d || fc.toolsOpen) await jumpTo(id, frame);
+ await workspaceReviewStatus();
+}
+
+function workspacePendingGroups() {
+ const priority = new Map([[QA_TYPES.duplicateTrack, 0], [QA_TYPES.overlap, 1], [QA_TYPES.ground, 2],
+  [QA_TYPES.motion, 3], [QA_TYPES.support, 9]]);
+ return issueGroups((lastQA?.rows ?? []).filter((issue) => qcReviewState(issue) === 'pending')).sort((a, b) =>
+  (priority.get(a.type) ?? 5) - (priority.get(b.type) ?? 5) || a.start - b.start || a.id - b.id);
+}
+
+function workspaceRenderIssues() {
+ const list = $('cqt-workspace-issues');
+ if (!list || !list.getClientRects().length) return;
+ list.replaceChildren();
+ const groups = workspacePendingGroups();
+ $('cqt-workspace-issues-summary').textContent = `Frame cần xem lại · ${groups.length} đoạn`;
+ if (qcDirty) { list.textContent = 'Quét lại để cập nhật danh sách.'; return; }
+ if (!groups.length) { list.textContent = lastQA ? 'Không còn vấn đề đang chờ.' : 'Bấm Quét QA để lập danh sách.'; return; }
+ for (const [index, group] of groups.slice(0, 25).entries()) {
+  const label = `#${group.id} · F${group.start}${group.end === group.start ? '' : '–F' + group.end} · ${group.type}`;
+  const button = workspaceText(list, 'button', label, 'cqt-btn cqt-btn-secondary cqt-sm');
+  button.addEventListener('click', guarded(() => workspaceIssueStep(0, index)));
+ }
+ if (groups.length > 25) workspaceText(list, 'small', 'Dùng Vấn đề › để duyệt các đoạn tiếp theo.');
+}
+
+async function workspaceIssueStep(delta, absolute = null) {
+ const groups = workspacePendingGroups();
+ if (qcDirty) return fail('Dữ liệu đã đổi. Quét lại Review trước khi điều hướng.');
+ if (!groups.length) return fail('Chưa có vấn đề đang chờ. Bấm Quét QA.');
+ const index = workspaceIssueIndex = absolute ?? (((workspaceIssueIndex < 0 && delta < 0 ? 0 : workspaceIssueIndex) + delta + groups.length) % groups.length);
+ const group = groups[index];
+ if ($('cqt-qc-workspace')) closeQCWorkspace(false);
+ if (!fc.open) await openFullControl(group.id);
+ await workspaceGo(group.id, group.start);
+ await workspaceOpen('qa');
+ workspaceIssueGroup = group;
+ const issue = group.issues[0];
+ $('cqt-workspace-issue').textContent = `${index + 1}/${groups.length} · #${group.id} · F${group.start}–F${group.end} · ${issue.desc}`;
+ await workspaceCompare([group.start - 1, group.start, group.start + 1].map((frame) => ({ id: group.id, frame })));
+}
+
+function workspaceText(parent, tag, value, className) {
+ const el = document.createElement(tag);
+ if (className) el.className = className;
+ el.textContent = value;
+ parent.append(el);
+ return el;
+}
+
+const workspaceColors = ['#38bdf8', '#fbbf24', '#c084fc', '#34d399', '#fb7185'];
+let workspaceCompareRequest = 0;
+
+function workspaceLocalCloud(state, cloud) {
+ const p = state.points, R = rotationMatrix(p[3], p[4], p[5]);
+ const samples = [];
+ const size = p.slice(6, 9).map((value) => value / 2 + 0.12);
+ const step = 3 * Math.max(1, Math.ceil(cloud.length / 900000));
+ const radius = 2 * Math.hypot(...size);
+ for (let i = 0; i + 2 < cloud.length; i += step) {
+  const dx = cloud[i] - p[0], dy = cloud[i + 1] - p[1], dz = cloud[i + 2] - p[2];
+  if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) > radius) continue;
+  const x = R[0][0] * dx + R[1][0] * dy + R[2][0] * dz;
+  const y = R[0][1] * dx + R[1][1] * dy + R[2][1] * dz;
+  const z = R[0][2] * dx + R[1][2] * dy + R[2][2] * dz;
+  if (Math.abs(x) <= size[0] && Math.abs(y) <= size[1] && Math.abs(z) <= size[2]) samples.push([x, y, z]);
+ }
+ if (samples.length <= 6000) return samples;
+ return Array.from({ length: 6000 }, (_, i) => samples[Math.floor(i * samples.length / 6000)]);
+}
+
+async function workspaceCompare(entries, overlay = false, host = 'cqt-workspace-compare') {
+ const output = $(host);
+ const id = ++workspaceCompareRequest;
+ const revision = workspaceRevision;
+ const history = qaHistoryStamp();
+ const target = workspaceContext().id;
+ output.textContent = 'Đang đọc frame…';
+ const data = [];
+ const bounds = jobBounds();
+ for (const entry of entries) {
+  const valid = Number.isInteger(entry.frame) && entry.frame >= bounds.start && entry.frame <= bounds.stop;
+  const state = valid ? await getState(entry.id, entry.frame, true) : null;
+  const cloud = isCuboid(state) && !state.outside ? await footGroundCloud(entry.frame) : null;
+  if (id !== workspaceCompareRequest || scope.signal.aborted || revision !== workspaceRevision || history !== qaHistoryStamp() ||
+      workspaceContext().id !== target) {
+   if (id === workspaceCompareRequest) output.textContent = 'Dữ liệu đã đổi. Mở đối chiếu lại.';
+   return;
+  }
+  data.push({ ...entry, state, points: cloud ? workspaceLocalCloud(state, cloud) : [] });
+ }
+ output.replaceChildren();
+ const axis = val('cqt-ref-view') || 'side';
+ const [horizontal, vertical] = axis === 'top' ? [1, 0] : axis === 'front' ? [1, 2] : [0, 2];
+ const mirror = axis === 'top' ? -1 : 1;
+ const size = Math.max(2, ...data.map(({ state }) => state?.points?.[6 + horizontal] || 0));
+ const height = Math.max(1.5, ...data.map(({ state }) => state?.points?.[6 + vertical] || 0));
+ const scale = Math.min(176 / size, 96 / height);
+ const draw = (container, datasets) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 220; canvas.height = 126;
+  canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', datasets.map(({ frame }) => `F${frame}`).join(', '));
+  canvas.title = `Đã căn tâm · ${(1/scale).toFixed(3)} m/pixel trước khi co khung`;
+  container.append(canvas);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = isLightTheme() ? '#f4f4f5' : '#09090b';
+  ctx.fillRect(0, 0, 220, 126);
+  for (const entry of datasets) {
+   if (entry.hidden || !isCuboid(entry.state)) continue;
+   ctx.fillStyle = ctx.strokeStyle = entry.color;
+   for (const point of entry.points) {
+    ctx.fillRect(110 + point[horizontal] * scale * mirror, 63 - point[vertical] * scale, 1.5, 1.5);
+   }
+   const w = entry.state.points[6 + horizontal] * scale, h = entry.state.points[6 + vertical] * scale;
+   ctx.strokeRect(110 - w / 2, 63 - h / 2, w, h);
+  }
+  return canvas;
+ };
+ data.forEach((entry, i) => { entry.color = workspaceColors[i % workspaceColors.length]; });
+ for (const entry of data) {
+  const card = document.createElement('div');
+  card.className = 'cqt-compare-card';
+  output.append(card);
+  workspaceText(card, 'strong', `#${entry.id} · F${entry.frame}`);
+  if (!isCuboid(entry.state) || entry.state.outside) {
+   workspaceText(card, 'span', 'Không hiện diện');
+   continue;
+  }
+  draw(card, [entry]);
+  workspaceText(card, 'small', `${fmtLWH(...entry.state.points.slice(6, 9))} · ${entry.points.length ? entry.points.length + ' điểm mẫu' : 'Chưa có cloud'}`);
+  if (entry.fingerprint && entry.fingerprint !== annotationFingerprint(entry.state)) workspaceText(card, 'small', 'Frame chuẩn đã đổi từ lần ghim.');
+ }
+ if (!overlay) return;
+ const baseline = data[0];
+ const acceptable = data.length >= 2 && data.every(({ state, points, fingerprint }) =>
+  isCuboid(state) && !state.outside && (!fingerprint || annotationFingerprint(state) === fingerprint) &&
+  points.length >= 30 && state.points.slice(6, 9).every((v, i) =>
+   Math.abs(v - baseline.state.points[6 + i]) <= baseline.state.points[6 + i] * 0.12));
+ if (!acceptable) {
+  workspaceText(output, 'p', 'Cần ít nhất hai frame đủ điểm, cùng tỷ lệ box và không có chuẩn đã thay đổi.');
+  return;
+ }
+ const voxel = ([x, y, z]) => `${Math.floor(x * 5)},${Math.floor(y * 5)},${Math.floor(z * 5)}`;
+ const reference = new Set(baseline.points.map(voxel));
+ const overlap = data.slice(1).map((entry) => entry.points.filter((point) => reference.has(voxel(point))).length / entry.points.length);
+ if (overlap.some((ratio) => ratio < 0.15)) {
+  workspaceText(output, 'p', 'Các lát điểm khác nhau quá nhiều để chồng theo hệ trục box. Xem cạnh nhau.');
+  return;
+ }
+ const card = document.createElement('div');
+ card.className = 'cqt-compare-card';
+ output.append(card);
+ workspaceText(card, 'strong', 'Chồng theo trục box · dùng để đối chiếu');
+ workspaceText(card, 'small', 'Ô 20 cm trùng frame chuẩn · ' + overlap.map((v) => `${Math.round(v * 100)}%`).join(' / '));
+ const canvas = draw(card, data);
+ let current = canvas;
+ for (const entry of data) {
+  const label = document.createElement('label');
+  const input = document.createElement('input');
+  input.type = 'checkbox'; input.checked = true;
+  label.style.color = entry.color;
+  label.append(input, ` F${entry.frame}`);
+  card.append(label);
+  input.addEventListener('change', () => {
+   entry.hidden = !input.checked;
+   const next = draw(card, data);
+   current.replaceWith(next);
+   current = next;
+  });
+ }
+}
+
+function workspaceRenderPins() {
+ const { id } = workspaceContext();
+ const pins = workspacePins.get(id) ?? [];
+ const select = $('cqt-ref-pins');
+ const old = select.value;
+ select.replaceChildren(...pins.map((pin) => new Option(`F${pin.frame} · ${fmtLWH(...pin.size)}`, String(pin.frame))));
+ if (pins.some((pin) => String(pin.frame) === old)) select.value = old;
+ $('cqt-ref-status').textContent = pins.length ? `#${id} · ${pins.length}/3 frame chuẩn` : 'Chưa ghim frame chuẩn.';
+}
+
+async function workspacePin() {
+ const [state] = await workspaceStates();
+ if (!state) return fail('Chọn cuboid hiện diện để ghim frame.');
+ const pins = workspacePins.get(state.clientID) || [];
+ const pin = { id: state.clientID, frame: state.frame, size: state.points.slice(6, 9), fingerprint: annotationFingerprint(state) };
+ workspacePins.set(state.clientID, [pin, ...pins.filter((item) => item.frame !== pin.frame)].slice(0, 3));
+ workspaceRenderPins();
+ $('cqt-ref-pins').value = String(pin.frame);
+ setStatus(`Đã ghim #${pin.id} · F${pin.frame}.`, 'success');
+}
+
+async function workspaceUseReference() {
+ const { id } = workspaceContext();
+ const pin = workspacePins.get(id)?.find((item) => item.frame === intVal('cqt-ref-pins'));
+ if (!pin) return fail('Ghim và chọn frame chuẩn trước.');
+ const state = await getState(id, pin.frame, true);
+ if (!isCuboid(state) || state.outside || pin.fingerprint !== annotationFingerprint(state)) {
+  return fail('Frame chuẩn đã thay đổi. Ghim lại để lấy kích thước mới.');
+ }
+ setField('cqt-target-id', id);
+ writeLWHInputs(...pin.size, true);
+ setStatus(`Đã chốt LWH từ #${id} · F${pin.frame}. Chọn phạm vi khi áp dụng.`, 'success');
+}
+
+async function workspaceSuggestReferences() {
+ const { id, frame } = workspaceContext();
+ if (!Number.isInteger(id)) return fail('Chọn object trước.');
+ const revision = workspaceRevision;
+ const numbers = new Set([frame, ...fc.allRows.filter((row) => !row.outside &&
+  fullSceneCache.has(sceneKey(row.frame))).map((row) => row.frame)]);
+ const scores = [];
+ for (const f of [...numbers].slice(0, 48)) {
+  const state = await getState(id, f, true);
+  if (workspaceContext().id !== id || revision !== workspaceRevision || scope.signal.aborted) return;
+  if (!isCuboid(state) || state.outside || state.occluded) continue;
+  const cloud = fullSceneCache.get(sceneKey(f)) || (f === loadedCloudFrame() ? getPointCloudPositions() : null);
+  if (!cloud) continue;
+  const points = workspaceLocalCloud(state, cloud);
+  const buckets = new Set(points.map(([x, y, z]) => (x >= 0 ? 1 : 0) + (y >= 0 ? 2 : 0) + (z >= 0 ? 4 : 0)));
+  if (points.length) scores.push({ frame: f, count: points.length, coverage: buckets.size });
+ }
+ const output = $('cqt-ref-suggestions');
+ output.replaceChildren();
+ scores.sort((a, b) => b.coverage - a.coverage || b.count - a.count);
+ for (const item of scores.slice(0, 5)) {
+  const button = workspaceText(output, 'button', `F${item.frame} · ${item.count} điểm mẫu / ${item.coverage} vùng`, 'cqt-btn cqt-btn-secondary cqt-sm');
+  button.addEventListener('click', guarded(() => workspaceGo(id, item.frame)));
+ }
+ if (!scores.length) output.textContent = 'Chưa có cloud trong bộ nhớ đệm để gợi ý.';
+}
+
+function workspaceDrawFace(ctx, row, project) {
+ const draft = workspaceFaceDraft;
+ if (!draft || draft.row !== row) return;
+ const axis = draft.axis, sign = draft.sign, p = draft.after;
+ const others = [0, 1, 2].filter((index) => index !== axis);
+ const poly = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([u,v]) => {
+  const local = [];
+  local[axis] = sign * p[6 + axis] / 2;
+  local[others[0]] = u * p[6 + others[0]] / 2;
+  local[others[1]] = v * p[6 + others[1]] / 2;
+  return project(...fcBoxPoint(p, ...local));
+ });
+ fcStrokePoly(ctx, poly, '#fbbf24', 2, [4, 3]);
+}
+
+function workspaceDrawSliceBounds(ctx, row, project) {
+ const slice = workspaceSlice;
+ if (!slice || slice.id !== (fc.open ? fc.targetId : dock.id)) return;
+ const p = row.base;
+ const others = [0, 1, 2].filter((axis) => axis !== slice.axis);
+ for (const sign of [-1, 1]) {
+  const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([u, v]) => {
+   const local = [];
+   local[slice.axis] = slice.offset + sign * slice.width / 2;
+   local[others[0]] = u * (p[6 + others[0]] / 2 + 0.5);
+   local[others[1]] = v * (p[6 + others[1]] / 2 + 0.5);
+   return project(...fcBoxPoint(p, ...local));
+  });
+  fcStrokePoly(ctx, corners, '#c084fc', 1.3, [3, 3]);
+ }
+}
+
+function workspaceReadSlice() {
+ if (!isChecked('cqt-slice-enable')) {
+  workspaceSlice = null;
+ } else {
+  const axis = Number(val('cqt-slice-axis'));
+  const offset = numVal('cqt-slice-offset');
+  const width = numVal('cqt-slice-width');
+  if (![0, 1, 2].includes(axis) || !Number.isFinite(offset) || !(width >= 0.02 && width <= 2)) {
+   return fail('Độ dày lát cắt từ 0,02–2 m và offset phải là số.');
+  }
+  workspaceSlice = { axis, offset, width, id: workspaceContext().id };
+ }
+ fcRerenderVisible();
+ scheduleDockRender();
+}
+
+function workspaceWheelSlice(e) {
+ if (!workspaceSlice || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey || !e.deltaY ||
+     !e.target.closest?.('canvas[data-view]:not([data-view="3d"])')) return false;
+ if (workspaceSlice.id !== workspaceContext().id || fc.drag) return false;
+ e.preventDefault();
+ e.stopPropagation();
+ const offset = clamp(workspaceSlice.offset + Math.sign(e.deltaY) * 0.05, -100, 100);
+ setField('cqt-slice-offset', offset.toFixed(2));
+ workspaceReadSlice();
+ return true;
+}
+
+async function workspaceFace(apply = false) {
+ if (isToolBusy() || fc.drag) return fail('Đợi thao tác đang chạy hoàn tất.');
+ const [state] = await workspaceStates();
+ if (!state || state.lock || state.isGroundTruth) return fail('Chọn cuboid có thể chỉnh.');
+ const [axis, sign] = val('cqt-face').split(':').map(Number);
+ const delta = numVal('cqt-face-delta');
+ if (![0, 1, 2].includes(axis) || !Number.isFinite(delta)) return fail('Nhập độ dịch chuyển theo mét.');
+ const before = annotationFingerprint(state);
+ const p = state.points;
+ const normal = rotationMatrix(p[3], p[4], p[5]).map((row) => row[axis] * sign);
+ const after = resizeFace(p, normal, axis, delta, isChecked('cqt-face-sym'));
+ const row = fc.open ? fcRowByFrame(state.frame) : dock.row;
+ if (!apply) {
+  workspaceClearFace();
+  workspaceFaceDraft = { before, after, frame: state.frame, id: state.clientID, row, axis, sign };
+  if (row && row.frame === state.frame) row.draft = after;
+  fcRerenderVisible();
+  scheduleDockRender();
+  $('cqt-face-preview').textContent = `#${state.clientID} · F${state.frame} · ${fmtLWH(...p.slice(6, 9))} → ${fmtLWH(...after.slice(6, 9))}`;
+  $('cqt-face-apply').disabled = false;
+  return;
+ }
+ const draft = workspaceFaceDraft;
+ if (!draft || draft.id !== state.clientID || draft.frame !== state.frame || draft.before !== before ||
+     !fcSamePoints(draft.after, after)) return fail('Box hoặc thông số đã đổi. Xem trước lại.');
+ workspaceClearFace();
+ const batch = createBatch('Chỉnh mặt cuboid');
+ await batch.edit(state, state.frame, (current) => fcSetPoints(current, after));
+ const result = await batch.finish();
+ setStatus(`Đã chỉnh ${result.changed} cuboid · F${state.frame}.` + editSuffix(result), result.changed ? 'success' : 'warn');
+}
+
+function workspaceClearFace() {
+ if (!workspaceFaceDraft) return false;
+ const { row, after } = workspaceFaceDraft;
+ if (row?.draft === after) row.draft = null;
+ workspaceFaceDraft = null;
+ $('cqt-face-preview').textContent = '';
+ $('cqt-face-apply').disabled = true;
+ fcRerenderVisible();
+ scheduleDockRender();
+ return true;
+}
+
+async function workspaceTrackCandidates() {
+ const { id, frame } = workspaceContext();
+ const { tracks } = await job.annotations.export();
+ const a = tracks.find((track) => track.clientID === id);
+ if (!a) return fail('Chọn track A trước khi tìm ứng viên.');
+ const state = await getState(id, frame, true);
+ if (!isCuboid(state) || scope.signal.aborted || workspaceContext().id !== id) return;
+ const present = (track) => track.shapes.filter((shape) => !shape.outside);
+ const left = present(a);
+ const startA = left[0]?.frame, endA = left.at(-1)?.frame;
+ const candidates = [];
+ for (const b of tracks) {
+  if (b.clientID === id || b.label_id !== a.label_id || b.shapes[0]?.type !== 'cuboid') continue;
+  const right = present(b);
+  if (!right.length) continue;
+  const first = right[0], last = right.at(-1);
+  const lower = Math.max(startA, first.frame);
+  const upper = Math.min(endA, last.frame);
+  const overlapping = upper >= lower;
+  const gap = overlapping ? 0 : Math.max(first.frame - endA, startA - last.frame);
+  const delta = Math.hypot(...state.points.slice(6, 9).map((v, i) => (v - first.points[i + 6]) / Math.max(v, 0.1)));
+  candidates.push({ id: b.clientID, gap, delta, overlapping, first: first.frame, last: last.frame });
+ }
+ const output = $('cqt-repair-candidates');
+ output.replaceChildren();
+ if (!candidates.length) { output.textContent = 'Không có track cùng nhãn.'; return; }
+ candidates.sort((a, b) => (val('cqt-repair-kind') === 'join' ? Number(a.overlapping) - Number(b.overlapping) : Number(b.overlapping) - Number(a.overlapping)) ||
+  a.gap - b.gap || a.delta - b.delta);
+ for (const candidate of candidates.slice(0, 6)) {
+  const button = workspaceText(output, 'button',
+   `#${candidate.id} · F${candidate.first}–F${candidate.last} · ${candidate.overlapping ? 'dải giao nhau' : 'cách ' + candidate.gap + ' frame'}`,
+   'cqt-btn cqt-btn-secondary cqt-sm');
+  button.title = `Chênh LWH tương đối ${Math.round(candidate.delta * 100)}%. Gợi ý từ nhãn, thời gian và kích thước.`;
+  button.addEventListener('click', () => {
+   setField('cqt-repair-b', candidate.id);
+   $('cqt-repair-b').dispatchEvent(new Event('input'));
+  });
+ }
+}
+
+function workspaceTrackInputs() {
+ const { id } = workspaceContext();
+ const bounds = jobBounds();
+ const action = val('cqt-repair-kind');
+ const b = intVal('cqt-repair-b');
+ const from = intVal('cqt-repair-from'), to = intVal('cqt-repair-to');
+ if (!Number.isInteger(id) || (action !== 'split' && (!Number.isInteger(b) || b === id))) {
+  throw new Error('Chọn track A và nhập ID track B hợp lệ.');
+ }
+ if (action !== 'join' && (!Number.isInteger(from) || from < bounds.start || from > bounds.stop ||
+    (action === 'swap' && (!Number.isInteger(to) || to < from || to > bounds.stop)))) {
+  throw new Error('Dải frame phải nằm trong job.');
+ }
+ return { id, b, action, from, to, bounds };
+}
+
+async function workspaceNativeHistoryStamp() {
+ return JSON.stringify(await job.actions.get());
+}
+
+async function workspaceTrackPreview() {
+ if (isToolBusy() || fc.drag) return fail('Đợi thao tác đang chạy hoàn tất.');
+ workspaceTrackDraft = null;
+ $('cqt-repair-result').textContent = '';
+ $('cqt-repair-compare').replaceChildren();
+ $('cqt-repair-apply').disabled = true;
+ const params = workspaceTrackInputs();
+ const { id, b, action, bounds } = params;
+ if (!job.annotations.commit) return fail('Phiên bản CVAT thiếu annotations.commit.');
+ const { tracks } = await job.annotations.export();
+ const a = tracks.find((track) => track.clientID === id);
+ const other = action === 'split' ? null : tracks.find((track) => track.clientID === b);
+ if (!a || (action !== 'split' && !other) || [a, other].filter(Boolean).some((track) =>
+  !track.shapes.length || track.shapes.some((shape) => shape.type !== 'cuboid'))) {
+  return fail('Sửa track cần các cuboid dạng Track.');
+ }
+ const revision = workspaceRevision;
+ const stamp = await workspaceNativeHistoryStamp();
+ const frames = new Map();
+ const from = Math.max(bounds.start, Math.min(a.frame, other?.frame ?? a.frame));
+ const busy = beginBusy('Sửa track · xem trước');
+ try {
+  for (let frame = from; frame <= bounds.stop; frame++) {
+   touchBusy(busy);
+   if (scope.signal.aborted || revision !== workspaceRevision) return;
+   try { if (JSON.stringify(workspaceTrackInputs()) !== JSON.stringify(params)) return; } catch { return; }
+   const states = await getStates(frame);
+   const left = states.find((state) => state.clientID === id);
+   const right = other && states.find((state) => state.clientID === b);
+   if ([left, right].some((state) => state?.lock || state?.isGroundTruth)) return fail('Track đang khóa hoặc là ground truth.');
+   if (left || right) frames.set(frame, { a: left, b: right });
+   if (frame % 32 === 0) {
+    $('cqt-repair-result').textContent = `Đang đọc F${frame}/${bounds.stop}…`;
+    await sleep(0);
+   }
+  }
+  if (stamp !== await workspaceNativeHistoryStamp() || scope.signal.aborted || revision !== workspaceRevision) return fail('Annotation đã đổi. Xem trước lại.');
+  const additions = planTrackRepair({ ...params, a, b: other, frames });
+  const visibleFrames = (side) => [...frames].filter(([, item]) => item[side] && !item[side].outside).map(([frame]) => frame);
+  const left = visibleFrames('a'), right = visibleFrames('b');
+  const description = (track, visible, state) => {
+   const tid = trackIdOf(state);
+   const ranges = formatFrameRanges(visible);
+   return `#${track.clientID} · ${tid.source === 'attr' ? `track_id ${tid.value} · ` : ''}${visible.length} frame · ` +
+    ranges.slice(0, 12).map((item) => item.text).join(', ') + (ranges.length > 12 ? '…' : '');
+  };
+  $('cqt-repair-result').textContent = [
+   description(a, left, frames.get(left[0])?.a), other && description(other, right, frames.get(right[0])?.b),
+   `Sau áp dụng · ${additions.map((track) => `F${track.frame}, ${track.shapes.length} keyframe`).join(' / ')} · CVAT cấp ID mới`,
+   'Undo/Redo bằng lịch sử CVAT. Bấm Save sau khi kiểm tra.',
+  ].filter(Boolean).join('\n');
+  workspaceTrackDraft = { params, revision, stamp, originals: [a, other].filter(Boolean), additions };
+  $('cqt-repair-apply').disabled = false;
+  if (left.length) {
+   const items = [{ id, frame: action === 'split' ? params.from : left.at(-1) }];
+   if (other && right.length) items.push({ id: b, frame: action === 'swap' ? params.from : right[0] });
+   await workspaceCompare(items, false, 'cqt-repair-compare');
+  }
+ } finally { endBusy(busy); }
+}
+
+async function workspaceTrackApply() {
+ if (isToolBusy() || fc.drag) return fail('Đợi thao tác đang chạy hoàn tất.');
+ const draft = workspaceTrackDraft;
+ if (annotationState()?.annotations.saving.uploading) return fail('Đợi CVAT lưu trước khi sửa track.');
+ const params = workspaceTrackInputs();
+ if (!draft || draft.revision !== workspaceRevision ||
+     JSON.stringify(params) !== JSON.stringify(draft.params)) return fail('Track hoặc dải đã đổi. Xem trước lại.');
+ const { tracks } = await job.annotations.export();
+ if (scope.signal.aborted || draft !== workspaceTrackDraft) return;
+ for (const original of draft.originals) {
+  const state = await getState(original.clientID, original.frame, true);
+  if ((state && (state.lock || state.isGroundTruth)) ||
+      JSON.stringify(tracks.find((item) => item.clientID === original.clientID)) !== JSON.stringify(original)) {
+   return fail('Track đã thay đổi hoặc đang khóa. Xem trước lại.');
+  }
+ }
+ if (draft.stamp !== await workspaceNativeHistoryStamp() || scope.signal.aborted || isToolBusy()) return fail('Annotation đã đổi. Xem trước lại.');
+ const busy = beginBusy('Sửa cấu trúc track');
+ workspaceTrackDraft = null;
+ $('cqt-repair-apply').disabled = true;
+ try {
+  await job.annotations.commit({ tracks: draft.additions }, { tracks: draft.originals }, getFrame());
+  workspaceRevision++;
+  invalidateQC();
+  const after = await job.annotations.export();
+  const old = new Set(tracks.map((track) => track.clientID));
+  const created = after.tracks.filter((track) => !old.has(track.clientID));
+  const mapping = `${draft.originals.map((track) => '#' + track.clientID).join(' / ')} → ${created.map((track) => '#' + track.clientID).join(' / ')}`;
+  $('cqt-repair-result').textContent = mapping + ' · Dùng Undo/Redo CVAT để hoàn tác/làm lại.';
+  workspaceRepairHistory.unshift({ label: `Sửa track · ${mapping}`, ts: Date.now(), items: [] });
+  if (workspaceRepairHistory.length > 15) workspaceRepairHistory.length = 15;
+  for (const [index, track] of created.entries()) {
+   const contributors = draft.params.action === 'join' ? draft.originals : [draft.originals[index] || draft.originals[0]];
+   const pins = contributors.flatMap((original) => workspacePins.get(original.clientID) || []);
+   const mapped = [];
+   for (const pin of pins) {
+    const state = await getState(track.clientID, pin.frame, true);
+    if (isCuboid(state) && !state.outside && pin.fingerprint === annotationFingerprint(state)) mapped.push({ ...pin, id: track.clientID });
+   }
+   if (mapped.length) workspacePins.set(track.clientID, mapped.slice(0, 3));
+  }
+  await refreshView();
+  const next = created[0];
+  if (next && fc.open) {
+   await workspaceGo(next.clientID, next.frame);
+   await workspaceOpen('track');
+   $('cqt-track-repair').open = true;
+  } else if (next) await jumpTo(next.clientID, next.frame);
+  setStatus(`Đã sửa track · ${mapping} · Ctrl+S để lưu.`, 'success');
+ } finally { endBusy(busy); }
+}
+
+function workspaceGroundControls(fullControl) {
+ const suffix = fullControl ? 'fc' : 'dock';
+ return `<div class="cqt-row cqt-wrap">
+  <label class="cqt-check"><input type="checkbox" data-ground-evidence checked> Điểm hỗ trợ</label>
+  <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-ground-roi-${suffix}">Chỉnh vùng</button>
+  <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-ground-clear-${suffix}">Bỏ vùng</button>
+  <span id="cqt-ground-region-${suffix}" class="cqt-hint" role="status"></span>
+ </div>`;
+}
+
+function workspaceSetRegion(region) {
+ workspaceRegion = region;
+ for (const suffix of ['fc', 'dock']) {
+  const indicator = $('cqt-ground-region-' + suffix);
+  if (indicator) indicator.textContent = region
+   ? `${region.include ? 'Lấy' : 'Loại'} vùng · #${region.id} · F${region.frame}` : '';
+ }
+ clearFootGroundPreview();
+ fcRerenderVisible();
+ scheduleDockRender();
+}
+
+function workspaceGroundRegion(fullControl, picked = null) {
+ const target = workspaceContext();
+ if (!Number.isInteger(target.id) || !Number.isInteger(target.frame)) return fail('Chọn object và frame trước.');
+ const current = workspaceRegion?.id === target.id && workspaceRegion.frame === target.frame ? workspaceRegion : null;
+ const state = fc.open ? fcRowByFrame(target.frame)?.base : annotationState()?.annotations.states.find((item) =>
+  item.clientID === target.id)?.points;
+ if (!state) return fail('Chưa có cuboid trong frame.');
+ $('cqt-modal')?.remove();
+ const previous = document.activeElement;
+ const modal = document.createElement('div');
+ modal.id = 'cqt-modal';
+ modal.innerHTML = `<form class="cqt-modal-box" role="dialog" aria-modal="true" aria-label="Vùng lấy điểm Ground">
+  <header class="cqt-modal-head"><span>Vùng lấy điểm · #${target.id} · F${target.frame}</span><button type="button" class="cqt-modal-x" aria-label="Đóng">×</button></header>
+  <div class="cqt-modal-body cqt-card">
+   <div class="cqt-row"><button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-pick-top>Kéo vùng trong Top</button></div>
+   <label class="cqt-col">Lọc vùng<select class="cqt-input" name="mode"><option value="include">Lấy vùng</option><option value="exclude">Loại vùng</option></select></label>
+   ${['X', 'Y', 'Z'].map((axis, i) => `<div class="cqt-row">
+    <label class="cqt-col">${axis} từ (m)<input class="cqt-input" name="lo${i}" type="number" step="any" required></label>
+    <label class="cqt-col">${axis} đến (m)<input class="cqt-input" name="hi${i}" type="number" step="any" required></label></div>`).join('')}
+  </div>
+  <footer class="cqt-modal-foot"><button class="cqt-btn cqt-btn-primary" type="submit">Dùng vùng này</button></footer>
+ </form>`;
+ root.append(modal);
+ const form = modal.querySelector('form');
+ form.elements.mode.value = (picked?.include ?? current?.include) === false ? 'exclude' : 'include';
+ const bottom = bottomZ(state);
+ for (let i = 0; i < 3; i++) {
+  const middle = i === 2 ? bottom : state[i];
+  const half = i === 2 ? 0.5 : Math.hypot(state[6], state[7]) / 2 + 1;
+  form.elements['lo' + i].value = (picked ?? current)?.bounds[i][0] ?? (middle - half).toFixed(3);
+  form.elements['hi' + i].value = (picked ?? current)?.bounds[i][1] ?? (middle + half).toFixed(3);
+ }
+ const close = () => { modal.remove(); previous?.focus({ preventScroll: true }); };
+ modal.querySelector('.cqt-modal-x').addEventListener('click', close);
+ modal.querySelector('[data-pick-top]').addEventListener('click', () => {
+  workspaceRegionPicking = { ...target, fullControl, include: form.elements.mode.value === 'include',
+   z: [form.elements.lo2.valueAsNumber, form.elements.hi2.valueAsNumber] };
+  close();
+  setStatus(`Kéo một vùng trong ô Top của #${target.id} · F${target.frame}. Esc để hủy.`, 'info');
+ });
+ form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const bounds = [0, 1, 2].map((i) => [form.elements['lo' + i].valueAsNumber, form.elements['hi' + i].valueAsNumber]);
+  if (bounds.some(([lo, hi]) => !Number.isFinite(lo) || !Number.isFinite(hi) || lo >= hi)) {
+   return fail('Mỗi trục cần cận dưới nhỏ hơn cận trên.');
+  }
+  if (workspaceContext().id !== target.id || workspaceContext().frame !== target.frame) {
+   return fail('Object hoặc frame đã đổi. Mở lại vùng lấy điểm.');
+  }
+  workspaceSetRegion({ ...target, include: form.elements.mode.value === 'include', bounds });
+  close();
+  void guarded(previewFootGround)(fullControl);
+ });
+ form.elements.mode.focus();
+}
+
+function workspaceStartRegion(e, row, canvas) {
+ const picking = workspaceRegionPicking;
+ if (!picking || e.button !== 0 || canvas.dataset.view !== 'top' || row.frame !== picking.frame ||
+     workspaceContext().id !== picking.id) return false;
+ const geometry = fcViewGeom(canvas, 'top', row);
+ const rect = canvas.getBoundingClientRect();
+ const yaw = row.base[5], cos = Math.cos(yaw), sin = Math.sin(yaw);
+ const project = (clientX, clientY) => {
+  const v = -(clientX - rect.left - geometry.cx) / geometry.k;
+  const u = -(clientY - rect.top - geometry.cy) / geometry.k;
+  return [row.base[0] + u * cos - v * sin, row.base[1] + u * sin + v * cos];
+ };
+ e.preventDefault();
+ e.stopPropagation();
+ const start = [e.clientX, e.clientY];
+ fc.drag = { type: 'ground-region', start, end: start, project, picking, dock: !fc.open, canvas, row };
+ return true;
+}
+
+function workspaceFinishRegion(drag, e) {
+ if (drag.dock) scheduleDockRender();
+ else fcSchedule([drag.row], 'top');
+ if (!e || !workspaceRegionPicking || Math.hypot(e.clientX - drag.start[0], e.clientY - drag.start[1]) < 4) return;
+ const points = [
+  drag.start, [e.clientX, drag.start[1]], [e.clientX, e.clientY], [drag.start[0], e.clientY],
+ ].map((point) => drag.project(...point));
+ const bounds = [0, 1].map((axis) => [Math.min(...points.map((p) => p[axis])), Math.max(...points.map((p) => p[axis]))]);
+ bounds.push(drag.picking.z);
+ workspaceRegionPicking = null;
+ workspaceGroundRegion(drag.picking.fullControl, { bounds, include: drag.picking.include });
+}
+
+function workspaceGroundRow(row) {
+ const id = fc.open ? fc.targetId : dock.id;
+ const preview = footGroundPreview;
+ const entry = preview?.rows.get(`${row.frame}:${id}`);
+ if (!entry || !fcSamePoints(row.base, entry.before)) return null;
+ return entry;
+}
+
+function workspaceDrawGround(ctx, row, project, view) {
+ const entry = workspaceGroundRow(row);
+ const id = fc.open ? fc.targetId : dock.id;
+ if (workspaceRegion?.id === id && workspaceRegion.frame === row.frame) {
+  const [[x0, x1], [y0, y1], [z0, z1]] = workspaceRegion.bounds;
+  const color = workspaceRegion.include ? '#34d399' : '#f87171';
+  for (const z of view === 'top' ? [z0] : [z0, z1]) {
+   fcStrokePoly(ctx, [[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]]
+    .map((point) => project(...point)), color, 1, [3, 3]);
+  }
+ }
+ if (!entry || !workspaceEvidence) return;
+ const { a, b, c, support, rejected } = entry.plane;
+ const p = row.base;
+ const span = Math.max(p[6], p[7], 1) * 0.8;
+ if (view === '3d' || view === 'top') {
+  const plane = [[-1,-1], [1,-1], [1,1], [-1,1]].map(([u,v]) => {
+   const x = p[0] + u * span, y = p[1] + v * span;
+   return project(x, y, a*x + b*y + c);
+  });
+  fcStrokePoly(ctx, plane, FOOT_GROUND_COLOR, 1.2, [5, 3]);
+ }
+ for (const [samples, color, size] of [[rejected, '#a1a1aa', 1.6], [support, FOOT_GROUND_COLOR, 3]]) {
+  if (!samples) continue;
+  ctx.fillStyle = color;
+  for (const point of samples) {
+   const [x,y] = project(...point);
+   ctx.fillRect(x - size/2, y - size/2, size, size);
+  }
+ }
+}
+
+function workspaceBind() {
+ const on = (id, fn, event = 'click') => $(id).addEventListener(event, guarded(fn));
+ on('cqt-ref-pin', workspacePin);
+ on('cqt-ref-suggest', workspaceSuggestReferences);
+ on('cqt-ref-use', workspaceUseReference);
+ on('cqt-ref-compare', () => {
+  const { id, frame } = workspaceContext();
+  const pin = workspacePins.get(id)?.find((item) => item.frame === intVal('cqt-ref-pins'));
+  if (!pin) return fail('Ghim và chọn frame chuẩn trước.');
+  workspaceCompareSelection = { id, pin };
+  workspaceLastCompareFrame = frame;
+  return workspaceCompare([pin, { id, frame }], false, 'cqt-ref-output');
+ });
+ on('cqt-ref-overlay', () => {
+  const { id, frame } = workspaceContext();
+  const pins = workspacePins.get(id) || [];
+  const entries = [...pins, ...(!pins.some((pin) => pin.frame === frame) ? [{ id, frame }] : [])];
+  if (entries.length < 2) return fail('Cần ít nhất hai frame để đối chiếu.');
+  workspaceCompareSelection = null;
+  return workspaceCompare(entries, true, 'cqt-ref-output');
+ });
+ on('cqt-ref-view', () => { if (workspaceCompareSelection) $('cqt-ref-compare').click(); }, 'change');
+ on('cqt-ref-pins', () => { if (workspaceCompareSelection) $('cqt-ref-compare').click(); }, 'change');
+ on('cqt-view-projection', toggleDockViews);
+ on('cqt-view-focus', () => cameraView('focus'));
+ for (const id of ['cqt-slice-enable', 'cqt-slice-offset', 'cqt-slice-width', 'cqt-slice-axis']) on(id, workspaceReadSlice, 'change');
+ on('cqt-face-show', () => workspaceFace());
+ on('cqt-face-apply', () => workspaceFace(true));
+ on('cqt-face-cancel', workspaceClearFace);
+ $('cqt-face-apply').disabled = true;
+ for (const id of ['cqt-face', 'cqt-face-sym', 'cqt-face-delta']) on(id, workspaceClearFace, 'input');
+ on('cqt-repair-show', workspaceTrackPreview);
+ on('cqt-repair-suggest', workspaceTrackCandidates);
+ on('cqt-repair-apply', workspaceTrackApply);
+ $('cqt-repair-apply').disabled = true;
+ const repairOptions = () => {
+  const action = val('cqt-repair-kind');
+  $('cqt-repair-b').disabled = action === 'split';
+  $('cqt-repair-suggest').disabled = action === 'split';
+  $('cqt-repair-from').disabled = action === 'join';
+  $('cqt-repair-to').disabled = action !== 'swap';
+  workspaceTrackDraft = null;
+  $('cqt-repair-apply').disabled = true;
+ };
+ for (const id of ['cqt-repair-kind','cqt-repair-b','cqt-repair-from','cqt-repair-to']) on(id, repairOptions, 'input');
+ repairOptions();
+ on('cqt-workspace-issue-list', workspaceRenderIssues, 'toggle');
+ on('cqt-review-stop', () => { if (qaInFlight) workspaceScanCancelled = true; });
+ on('cqt-workspace-reviewed', workspaceMarkReviewed);
+ on('cqt-workspace-history-open', () => {
+  const history = $('cqt-workspace-history');
+  history.hidden = !history.hidden;
+  if (!history.hidden) workspaceHistory();
+ });
+ on('cqt-workspace-issue-prev', () => workspaceIssueStep(-1));
+ on('cqt-workspace-issue-next', () => workspaceIssueStep(1));
+ on('cqt-workspace-issue-ok', () => workspaceDisposition('accepted'));
+ on('cqt-workspace-issue-later', () => workspaceDisposition('deferred'));
+ on('cqt-review-export', workspaceExportReview);
+ on('cqt-review-import', (e) => workspaceImportReview(e.target.files[0]), 'change');
+ $('cqt-review-local').checked = getSettings().localReview === true;
+ on('cqt-review-local', async (e) => {
+  if (safeData() && e.target.checked) {
+   e.target.checked = false;
+   return fail('Tắt Chế độ an toàn dữ liệu trước khi lưu review cục bộ.');
+  }
+  lsSet(LS.settings, { ...getSettings(), localReview: e.target.checked });
+  if (e.target.checked) { await workspaceLoadReview(); await workspaceSaveReview(); }
+  await workspaceReviewStatus();
+ }, 'change');
+ on('cqt-ground-roi-dock', () => workspaceGroundRegion(false));
+ on('cqt-ground-clear-dock', () => workspaceSetRegion(null));
+ root.addEventListener('change', (event) => {
+  if (!event.target.matches('[data-ground-evidence]')) return;
+  workspaceEvidence = event.target.checked;
+  root.querySelectorAll('[data-ground-evidence]').forEach((input) => { input.checked = workspaceEvidence; });
+  fcRerenderVisible();
+  scheduleDockRender();
+  refreshGroundScanRing();
+ });
+ void guarded(workspaceLoadReview)();
+}
+
+let workspaceIssueGroup = null;
+function workspaceDisposition(status) {
+ if (!workspaceIssueGroup || qcDirty) return fail('Mở một vấn đề từ kết quả QA mới nhất.');
+ for (const issue of workspaceIssueGroup.issues) qcReview.set(qcIssueKey(issue), status);
+ workspaceIssueGroup = null;
+ workspaceIssueIndex--;
+ renderQC();
+ workspaceRenderIssues();
+ $('cqt-workspace-issue').textContent = status === 'accepted' ? 'Đã ghi nhận đúng thực tế.' : 'Đã để sau.';
+}
+
+async function workspacePromoteReviewIDs() {
+ const pending = new Map();
+ for (const key of workspaceReviews.keys()) {
+  const match = /^(track|shape):tmp-(\d+):(\d+)$/.exec(key);
+  if (match) {
+   const frame = Number(match[3]);
+   if (!pending.has(frame)) pending.set(frame, new Set());
+   pending.get(frame).add(Number(match[2]));
+  }
+ }
+ let remapped = false;
+ for (const [frame, ids] of pending) {
+  if (scope.signal.aborted) return;
+  for (const state of await getStates(frame)) {
+   if (!ids.has(state.clientID) || state.serverID == null || !isCuboid(state)) continue;
+   workspaceReviewFor(state);
+   remapped = true;
+  }
+ }
+ if (remapped) await workspaceSaveReview();
+}
+
+function workspaceSaveState() {
+ const uploading = !!annotationState()?.annotations.saving?.uploading;
+ const finished = workspaceWasSaving && !uploading;
+ workspaceWasSaving = uploading;
+ if (finished) void guarded(workspacePromoteReviewIDs)();
+ const status = $('cqt-fc-save-state');
+ if (!fc.open || !status) return;
+ let dirty;
+ try { dirty = job.annotations.hasUnsavedChanges(); } catch { return; }
+ status.textContent = uploading ? 'CVAT đang lưu…' : dirty ? 'Chưa Save CVAT' : 'Đã lưu CVAT';
+ $('cqt-fc-save').disabled = uploading || !dirty;
+}
+
+function workspaceSync() {
+ const context = workspaceContext();
+ if (workspaceRegionPicking && (workspaceRegionPicking.id !== context.id || workspaceRegionPicking.frame !== context.frame)) {
+  workspaceRegionPicking = null;
+  if (fc.drag?.type === 'ground-region') fc.drag = null;
+ }
+ if (workspaceFaceDraft && (workspaceFaceDraft.id !== context.id || workspaceFaceDraft.frame !== context.frame)) workspaceClearFace();
+ if (workspaceSlice && workspaceSlice.id !== context.id) {
+  workspaceSlice = null;
+  $('cqt-slice-enable').checked = false;
+  fcRerenderVisible();
+  scheduleDockRender();
+ }
+ if (workspaceCompareSelection?.id === context.id && workspaceLastCompareFrame !== context.frame &&
+     $('cqt-ref-output')?.getClientRects().length) {
+  workspaceLastCompareFrame = context.frame;
+  clearTimeout(workspaceCompareTimer);
+  workspaceCompareTimer = setTimeout(guarded(() => {
+   if (workspaceCompareSelection?.id === context.id && workspaceContext().frame === context.frame) {
+    return workspaceCompare([workspaceCompareSelection.pin, context], false, 'cqt-ref-output');
+   }
+  }), 120);
+ }
+ const marker = $('cqt-fc-context');
+ if (marker) $('cqt-fc-context-scope').textContent = fc.selected.size > 1 ? `${fc.selected.size} frame đã chọn` : '';
+ if (workspaceLastPinTarget !== context.id) {
+  workspaceCompareSelection = null;
+  workspaceLastPinTarget = context.id;
+  workspaceRenderPins();
+  $('cqt-ref-output').replaceChildren();
+  $('cqt-ref-suggestions').replaceChildren();
+ }
+ void guarded(workspaceReviewStatus)();
+}
+let workspaceLastPinTarget = null;
+
+function workspaceUpdateTimeline() {
+ const slider = $('cqt-fc-context-slider');
+ if (!slider) return;
+ const index = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
+ slider.max = Math.max(0, fc.filteredRows.length - 1);
+ slider.value = Math.max(0, index);
+ slider.disabled = fc.filteredRows.length <= 1;
+ $('cqt-fc-context-prev').disabled = index <= 0;
+ $('cqt-fc-context-next').disabled = index < 0 || index >= fc.filteredRows.length - 1;
+ $('cqt-fc-context-frame').textContent = index < 0 ? '—' : `F${fc.focusFrame} · ${index + 1}/${fc.filteredRows.length}${fc.filteredRows[index].key ? ' · Key' : ''}`;
+}
+
 function bindPanel(wrapper) {
  const pinBtn = wrapper.querySelector("#cqt-btn-pin");
  if (toolbar) {
@@ -14354,6 +15804,12 @@ function bindPanel(wrapper) {
   setState,
   layout(rect) {
    const position = placement.position;
+   if (fc.open && fc.toolsOpen) {
+    root.classList.add('cqt-fc-tools-docked');
+    const width = wrapper.offsetWidth || 382;
+    placeToolboxPanel(wrapper, window.innerWidth - width - 8, 8);
+    return;
+   }
    let x = position?.x ?? (fc.toolsOpen ? 8 : (rect?.left ?? 0) + 8);
    let y = position?.y ?? (fc.toolsOpen ? 8 : (rect?.top ?? 98) + 8);
    if (position?.edgeX) x = position.edgeX === 'right' ? window.innerWidth : 0;
@@ -14399,6 +15855,11 @@ function bindPanel(wrapper) {
    wrapper.querySelectorAll(".cqt-tab").forEach((t) => t.classList.toggle("active", t === tab));
    wrapper.querySelectorAll(".cqt-pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === tab.dataset.tab));
    wrapper.querySelector("#cvat-quicktool-body").scrollTop = 0;
+   if (tab.dataset.tab === 'reference') workspaceRenderPins();
+   if (tab.dataset.tab === 'qa') {
+    void guarded(workspaceReviewStatus)();
+    workspaceRenderIssues();
+   }
    refreshGroundScanRing();
   });
  });
@@ -14681,10 +16142,12 @@ const sync = guarded(async () => {
  if (xf.active && getFrame() !== xf.frame) cancelTransform();
  if (lastQA && !qaInFlight && !qcDirty && lastQA.history !== qaHistoryStamp()) invalidateQC();
  syncFrameLabel();
+ workspaceSaveState();
  refreshGroundScanRing();
  syncActiveObjectQuiet();
  await dockTick();
  await autoAttrTick();
+ workspaceSync();
 });
 let unsubscribe;
 let interval;
@@ -14698,6 +16161,7 @@ function dispose() {
   scope.abort();
   unsubscribe?.();
   clearTimeout(storeSyncTimer);
+  clearTimeout(workspaceCompareTimer);
   clearInterval(interval);
   clearTimeout(toastTimer);
   cancelAnimationFrame(fc.raf);
@@ -14713,6 +16177,7 @@ function dispose() {
 
 try {
  createUI();
+ workspaceBind();
  installGlobalHandlers();
  installDockHandlers();
  unsubscribe = store.subscribe(() => {
