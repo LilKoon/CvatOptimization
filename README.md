@@ -10,7 +10,7 @@ Trong **3D lớn**, mỗi frame lấp đầy chiều cao còn lại, với khung
 
 Khi bật **Tự nạp Cloud** và **Đầy đủ điểm**, **Nạp object** tải trước và giữ tối đa 256 MiB tọa độ point cloud cho track đang mở. Khi track vượt mức đó, **3D lớn** và **Frame lớn** tự nạp lại dữ liệu chi tiết cho frame đang xem. Tiến độ cuối lượt nạp phản ánh số frame đang có đủ điểm. Khung phát chính của CVAT giữ nguyên frame đang mở.
 
-Ba nút bố cục luôn hiện cạnh Object ID. Dùng `1` / `2` / `3` để đổi giữa **Bảng track**, **Frame lớn** và **3D lớn**. Rê chuột hoặc bấm **Thanh công cụ** để mở ba tab **Hiển thị**, **Frame & Track** và **Fit Ground**. Bấm **Ghim** để giữ thanh mở. Dùng `⌥−` / `⌥=` (Windows/Linux dùng `Alt+-` / `Alt+=`) để chỉnh cỡ điểm hoặc kéo thanh trượt trong tab **Hiển thị**. Thông báo mức cỡ điểm tự ẩn.
+Ba nút bố cục luôn hiện cạnh Object ID. Dùng `1` / `2` / `3` để đổi giữa **Bảng track**, **Frame lớn** và **3D lớn**. **Undo**, **Redo** và **Đóng** nằm ở bên phải thanh đầu. Rê chuột hoặc bấm **Thanh công cụ** để mở bộ lọc, Limit, QA/QC và các tab **Hiển thị**, **Frame & Track**, **Fit Ground**. Bấm **Ghim** để giữ thanh mở. Bật tự nạp hoặc quét lại Cloud trong tab **Hiển thị**. Tiến trình nạp hiện ở thanh trạng thái. Dùng `⌥−` / `⌥=` (Windows/Linux dùng `Alt+-` / `Alt+=`) để chỉnh cỡ điểm hoặc kéo thanh trượt trong tab **Hiển thị**. Thông báo mức cỡ điểm tự ẩn.
 
 Trên macOS, `⌥C` chốt kích thước và `⌥D` đồng bộ L/W/H cho toàn track. Bấm `⌥G` (Windows/Linux dùng `Alt+G`), chọn **Nguồn** bằng số rồi chọn **Phạm vi**. Ví dụ `⌥G` → `2` → `4` xem trước Fit Ground theo mặt đất toàn cảnh cho toàn object. Bấm `Enter` để áp dụng hoặc `Esc` để hủy.
 

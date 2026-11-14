@@ -226,7 +226,7 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '4.9.5';
+const VERSION = '4.9.6';
 const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
@@ -10349,8 +10349,8 @@ function fcProgress(done, total) {
 }
 
 function fcSetHarvestUI(on) {
- const stop = $('cqt-fc-stop');
- if (stop) stop.style.display = on ? '' : 'none';
+ const progress = $('cqt-fc-cloud-progress');
+ if (progress) progress.hidden = !on;
  const rescan = $('cqt-fc-rescan');
  if (rescan) rescan.disabled = on;
 }
@@ -10863,31 +10863,22 @@ const FC_HTML = `
    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
    <span>Full Control</span>
    <span class="cqt-badge">v${VERSION}</span>
-   <button type="button" id="cqt-fc-toolbar-toggle" class="cqt-btn cqt-btn-secondary cqt-sm" aria-expanded="false" aria-controls="cqt-fc-toolbar" title="Rê chuột hoặc bấm để mở thanh công cụ">Thanh công cụ${ICONS.chevronDown}</button>
+   <button type="button" id="cqt-fc-toolbar-toggle" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Thanh công cụ" aria-expanded="false" aria-controls="cqt-fc-toolbar" title="Rê chuột hoặc bấm để mở thanh công cụ"><span>Thanh công cụ</span>${ICONS.chevronDown}</button>
    <button type="button" id="cqt-fc-toolbar-pin" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" aria-label="Ghim thanh công cụ" aria-pressed="false" aria-controls="cqt-fc-toolbar" title="Ghim thanh công cụ">${ICONS.pin}</button>
   </div>
   <div class="cqt-fc-head-tools">
    <span class="cqt-label">Object</span>
    <input type="number" id="cqt-fc-target" class="cqt-input" placeholder="ID" min="1" step="1" inputmode="numeric" data-object-id aria-label="Object ID" title="ID hiển thị trong danh sách Objects của CVAT" />
+   <button id="cqt-fc-load" class="cqt-btn cqt-btn-primary cqt-sm cqt-none" aria-label="Nạp object" title="Nạp cuboid độc lập hoặc track theo Object ID (Enter)">Nạp<span> object</span></button>
    <span id="cqt-fc-object-summary" class="cqt-label" aria-live="polite" hidden><span></span><b></b></span>
    <div class="cqt-fc-seg" role="group" aria-label="Bố cục Full Control">
-    <button type="button" data-fc-layout="table" aria-pressed="true" data-shortcut-title="layout-table" data-shortcut-title-text="Bảng track">Bảng track</button>
-    <button type="button" data-fc-layout="focus" aria-pressed="false" data-shortcut-title="layout-focus" data-shortcut-title-text="Frame lớn · Cuộn để chuyển frame">Frame lớn</button>
-    <button type="button" data-fc-layout="stacked" aria-pressed="false" data-shortcut-title="layout-stacked" data-shortcut-title-text="3D lớn · Cuộn để chuyển frame">3D lớn</button>
+    <button type="button" data-fc-layout="table" aria-label="Bảng track" aria-pressed="true" data-shortcut-title="layout-table" data-shortcut-title-text="Bảng track">Bảng<span> track</span></button>
+    <button type="button" data-fc-layout="focus" aria-label="Frame lớn" aria-pressed="false" data-shortcut-title="layout-focus" data-shortcut-title-text="Frame lớn · Cuộn để chuyển frame">Frame<span> lớn</span></button>
+    <button type="button" data-fc-layout="stacked" aria-label="3D lớn" aria-pressed="false" data-shortcut-title="layout-stacked" data-shortcut-title-text="3D lớn · Cuộn để chuyển frame">3D<span> lớn</span></button>
    </div>
-   <button id="cqt-fc-pick" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" aria-label="Lấy object đang chọn" title="Nạp object đang chọn trên canvas hoặc trong danh sách Objects">${ICONS.crosshair}<span>Lấy đang chọn</span></button>
-   <button id="cqt-fc-load" class="cqt-btn cqt-btn-primary cqt-sm cqt-none" title="Nạp cuboid độc lập hoặc track theo Object ID (Enter)">Nạp object</button>
-   <button id="cqt-fc-rescan" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" aria-label="Quét lại Cloud" title="Xoá cache và quét lại point cloud mọi frame">${ICONS.refresh}<span>Quét lại Cloud</span></button>
-   <button id="cqt-fc-safedata" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Bật / Tắt Chế độ an toàn dữ liệu (hoặc Tự nạp Cloud đa frame)"></button>
-   <div class="cqt-fc-progress" title="Tiến trình nạp point cloud"><div id="cqt-fc-progress-bar"></div></div>
-   <span id="cqt-fc-progress-text" class="cqt-label">0%</span>
-   <button id="cqt-fc-stop" class="cqt-btn cqt-btn-danger cqt-sm cqt-none" style="display:none;" title="Dừng quét cloud (giữ phần đã nạp)">Dừng</button>
   </div>
   <div class="cqt-fc-head-actions">
    <button id="cqt-fc-tools" class="cqt-btn cqt-btn-secondary cqt-sm" aria-pressed="false" aria-controls="cvat-quicktool-panel" aria-label="Công cụ Toolbox" title="Box, Ground, Track, QA và Cài đặt của Toolbox">${ICONS.cuboid}<span>Công cụ Toolbox</span></button>
-   <button id="cqt-fc-edit-limits" class="cqt-btn cqt-btn-secondary cqt-sm" aria-expanded="false" aria-controls="cqt-fc-limits" aria-label="Limit theo class" title="Limit theo class">${ICONS.sliders}<span>Limit theo class</span></button>
-   <button id="cqt-fc-qc" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="QA/QC" title="QA/QC">${ICONS.chart}<span>QA/QC</span></button>
-   <button id="cqt-fc-theme" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Đổi giao diện Sáng (Light) / Tối (Dark)"></button>
    <button id="cqt-fc-undo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled aria-label="Undo" title="Hoàn tác thao tác gần nhất (${OPTION_KEY}Z)">${ICONS.undo}<span>Undo</span></button>
    <button id="cqt-fc-redo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled aria-label="Redo" title="Làm lại thao tác vừa hoàn tác (${shortcutLabel('direct', 'redo')})">${ICONS.redo}<span>Redo</span></button>
    <button id="cqt-fc-max" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" title="Phóng to toàn màn / Thu về cửa sổ"></button>
@@ -10911,6 +10902,11 @@ const FC_HTML = `
    <button id="cqt-fc-focus-next" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame sau">›</button>
   </div>
   <div id="cqt-fc-health-badges" class="cqt-hp-badges"></div>
+  <div class="cqt-fc-toolbar-actions">
+   <button id="cqt-fc-pick" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" aria-label="Lấy object đang chọn" title="Nạp object đang chọn trên canvas hoặc trong danh sách Objects">${ICONS.crosshair}<span>Lấy đang chọn</span></button>
+   <button id="cqt-fc-edit-limits" class="cqt-btn cqt-btn-secondary cqt-sm" aria-expanded="false" aria-controls="cqt-fc-limits">${ICONS.sliders}<span>Limit theo class</span></button>
+   <button id="cqt-fc-qc" class="cqt-btn cqt-btn-secondary cqt-sm">${ICONS.chart}<span>QA/QC</span></button>
+  </div>
  </div>
  <div id="cqt-fc-limits" hidden></div>
  <div class="cqt-fc-bar cqt-fc-tabs" role="tablist" aria-label="Nhóm công cụ Full Control">
@@ -10935,6 +10931,9 @@ const FC_HTML = `
   <button id="cqt-fc-toggle-3d" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Hiện / Ẩn cột tương tác 3D (xoay quanh xe &amp; kéo thả hộp 3D)">Cột 3D</button>
   <button id="cqt-fc-scene3d" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Hiển thị toàn bộ đám mây điểm 3D quanh xe + mọi cuboid khác trong frame trên cột 3D (Ctrl/Alt + Lăn chuột trên ô 3D để zoom riêng)">${ICONS.globe}<span>Toàn cảnh 3D</span></button>
   <button id="cqt-fc-full-detail" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" type="button" aria-pressed="true" title="Khi bật Tự nạp Cloud, nạp đủ điểm cho track. Nếu vượt bộ nhớ đệm, các frame còn lại tự nạp khi xem.">Đầy đủ điểm</button>
+  <button id="cqt-fc-safedata" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none"></button>
+  <button id="cqt-fc-rescan" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xoá cache và quét lại point cloud mọi frame">${ICONS.refresh}<span>Quét lại Cloud</span></button>
+  <button id="cqt-fc-theme" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Đổi giao diện Sáng (Light) / Tối (Dark)"></button>
   <button id="cqt-fc-live3d" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Chia đôi màn hình (Split View): mở song song khung 3D WebGL thật của CVAT và tự đồng bộ frame + căn tâm camera 3D khi chọn hàng">${ICONS.split}<span>3D CVAT Live</span></button>
   <div id="cqt-fc-live-layouts" class="cqt-fc-seg" style="display:none;" title="Chọn bố cục chia màn hình 3D CVAT Live (hoặc kéo thanh tiêu đề Full Control để chỉnh tỷ lệ)">
    <button data-split-mode="bottom" title="Chia Trên / Dưới: Phía trên hiện 3D CVAT + Ảnh Camera (tự căn tâm camera 3D), phía dưới là Full Control">${ICONS.panelBottom}<span>Dưới</span></button>
@@ -11038,7 +11037,14 @@ const FC_HTML = `
  </div>
  <div class="cqt-fc-list" id="cqt-fc-list"></div>
  </div>
- <div id="cqt-fc-status" class="cqt-fc-status">Sẵn sàng.</div>
+ <div class="cqt-fc-footer">
+  <div id="cqt-fc-status" class="cqt-fc-status">Sẵn sàng.</div>
+  <div id="cqt-fc-cloud-progress" hidden>
+   <div class="cqt-fc-progress" title="Tiến trình nạp point cloud"><div id="cqt-fc-progress-bar"></div></div>
+   <span id="cqt-fc-progress-text" class="cqt-label">0%</span>
+   <button id="cqt-fc-stop" class="cqt-btn cqt-btn-danger cqt-sm cqt-none" title="Dừng quét cloud (giữ phần đã nạp)">Dừng</button>
+  </div>
+ </div>
 `;
 
 function fcApplyBounds() {
@@ -13492,7 +13498,7 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 8px 9px; border-top: 1p
 .cqt-fc-resizer[data-dir="se"] { bottom: 0; right: 0; width: 14px; height: 14px; cursor: nwse-resize; }
 .cqt-fc-head { padding: 8px 14px; background: var(--cqt-bg); border-bottom: 1px solid var(--cqt-border); display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: move; flex: none; }
 .cqt-fc-title { font-weight: 600; font-size: 13px; color: var(--cqt-text); display: flex; align-items: center; gap: 7px; white-space: nowrap; }
-.cqt-fc-head-tools { display: flex; align-items: center; gap: 6px; flex: 1; max-width: 820px; }
+.cqt-fc-head-tools { display: flex; align-items: center; gap: 6px; }
 #cqt-fc-target { width: 68px; height: 24px; padding: 2px 6px; font-weight: 600; }
 #cqt-fc-safedata.cqt-fc-safedata-on { border-color: rgba(245,158,11,0.45); color: #f59e0b; background: rgba(245,158,11,0.08); }
 #cqt-fc-safedata.cqt-fc-safedata-off { border-color: rgba(16,185,129,0.55); color: #10b981; background: rgba(16,185,129,0.12); font-weight: 600; }
