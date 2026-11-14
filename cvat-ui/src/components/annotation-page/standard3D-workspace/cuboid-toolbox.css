@@ -335,7 +335,7 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
 }
 
 @container (max-width: 1240px) {
-    #cvat-cuboid-toolbox .cqt-fc-head :is(#cqt-fc-tools, #cqt-fc-undo, #cqt-fc-redo) > span,
+    #cvat-cuboid-toolbox .cqt-fc-head :is(#cqt-fc-tools, #cqt-fc-undo, #cqt-fc-redo, #cqt-fc-reference-toggle) > span,
     #cvat-cuboid-toolbox .cqt-fc-head #cqt-fc-object-summary > span {
         display: none;
     }
@@ -817,12 +817,44 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
     align-items: end;
 }
 
+#cvat-cuboid-toolbox #cqt-fc-reference {
+    position: absolute;
+    inset-block-start: var(--cqt-fc-head-height, 44px);
+    inset-inline-end: 8px;
+    z-index: 20;
+    width: min(384px, calc(100% - 16px));
+    max-height: calc(100% - var(--cqt-fc-head-height, 44px) - 8px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--cqt-border);
+    border-radius: 8px;
+    background: var(--cqt-bg);
+    box-shadow: var(--cqt-shadow);
+}
+
+#cvat-cuboid-toolbox .cqt-fc-reference-head {
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--cqt-border);
+}
+
+#cvat-cuboid-toolbox #cqt-reference-controls {
+    margin: 8px;
+}
+
+#cvat-cuboid-toolbox #cqt-fc-view-controls {
+    margin: 4px 8px;
+}
+
 #cvat-cuboid-toolbox #cqt-ground-shortcut {
     position: fixed;
-    z-index: 1000003;
+    z-index: 1000009;
     inset: auto auto 24px 50%;
     transform: translateX(-50%);
-    width: min(360px, calc(100vw - 24px));
+    width: min(420px, calc(100vw - 24px));
+    max-height: calc(100dvh - 48px);
+    overflow: auto;
+    overscroll-behavior: contain;
     box-sizing: border-box;
     padding: 12px;
     border: 1px solid var(--cqt-border);
@@ -894,4 +926,9 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
 
 #cvat-cuboid-toolbox .cqt-fc-ground > :is(.cqt-ground-controls, .cqt-ground-result, .cqt-hint) {
     margin: 0 12px 8px;
+}
+
+#cvat-cuboid-toolbox .cqt-ground-shortcut-actions {
+    justify-content: flex-end;
+    margin-top: 8px;
 }

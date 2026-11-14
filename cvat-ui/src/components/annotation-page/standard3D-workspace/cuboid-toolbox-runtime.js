@@ -235,7 +235,7 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '5.0.0';
+const VERSION = '5.0.1';
 const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
@@ -2451,7 +2451,7 @@ function footGroundSelectionKey(fullControl) {
   val(prefix + 'mode'), val(prefix + 'direction'), frames]);
 }
 
-async function previewFootGround(fullControl, focusApply = false) {
+async function previewFootGround(fullControl, focusApply = false, output = null) {
  if (groundFitting || fc.busy || fc.harvesting || isToolBusy()) return fail('Đang xử lý thao tác trước, thử lại khi hoàn tất.');
  const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
  const kind = val(prefix + 'kind');
@@ -2519,9 +2519,12 @@ async function previewFootGround(fullControl, focusApply = false) {
   const newKeys = edits.filter((row) => !row.keyframe).length;
   const summary = `Dự kiến chỉnh ${edits.length}/${candidates} ${ids.length === 1 ? 'frame' : 'lượt'}` +
    (newKeys ? ` · ${newKeys} keyframe mới` : '') + (protectedCount ? ` · ${protectedCount} cuboid được bảo vệ` : '');
+ const frameLink = (frame, text, hint = '') => output
+   ? `<span title="${hint}">${text}</span>`
+   : `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${frame}" title="${hint}">${text}</button>`;
   const missing = (frames, label) => frames.size ? `<div>${label} (${frames.size}) · ${formatFrameRanges([...frames]).map(({ from, text }) =>
-   `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${from}">${text}</button>`).join(' ')}</div>` : '';
-  const result = $(prefix + 'result');
+   frameLink(from, text)).join(' ')}</div>` : '';
+  const result = output?.result ?? $(prefix + 'result');
   result.hidden = false;
   const frameResults = [...rows.values()].map((row) => {
    let adjustment = 'Bỏ qua theo hướng';
@@ -2536,16 +2539,16 @@ async function previewFootGround(fullControl, focusApply = false) {
    const object = ids.length > 1 ? ` · #${row.id}` : '';
    const evidence = ` · ${row.plane.count} mẫu · ${row.plane.coverage}/4 vùng · RMS ${(row.plane.residual * 100).toFixed(1)} cm`;
    if (row.uncertain) adjustment = 'Cần xem lại · mặt phẳng không khớp dưới chân';
-   return `<div class="cqt-row"><label class="cqt-check" title="Chọn frame cần áp dụng"><input type="checkbox" data-ground-select="${row.frame}:${row.id}" ${row.changed ? 'checked' : 'disabled'} aria-label="Áp dụng F${row.frame}${object}"></label><button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${row.frame}" title="${area}${evidence}">F${row.frame}${object} · ${adjustment}${evidence}</button></div>`;
+   return `<div class="cqt-row"><label class="cqt-check" title="Chọn frame cần áp dụng"><input type="checkbox" data-ground-select="${row.frame}:${row.id}" ${row.changed ? 'checked' : 'disabled'} aria-label="Áp dụng F${row.frame}${object}"></label>${frameLink(row.frame, `F${row.frame}${object} · ${adjustment}${evidence}`, area + evidence)}</div>`;
   }).join('');
   result.innerHTML = `<div data-foot-ground-preview><div>${summary}</div>${rows.size ? `<details ${rows.size <= 6 ? 'open' : ''}>
    <summary>Kết quả từng frame</summary><div class="cqt-row cqt-wrap">${frameResults}</div></details>` : ''}
    ${missing(missingCloud, 'Chưa có point cloud')}${missing(missingGround, 'Điểm mặt đất chưa đủ tin cậy')}
    ${newKeys ? '<div>Undo khôi phục tọa độ và giữ các keyframe mới.</div>' : ''}</div>`;
-  footGroundPreview = { key, fullControl, rows, kind };
+  footGroundPreview = { key, fullControl, rows, kind, result };
   fcRerenderVisible();
   scheduleDockRender();
-  const applyButton = $(fullControl ? 'cqt-fc-ground-apply' : 'cqt-btn-ground-apply');
+  const applyButton = output?.apply ?? $(fullControl ? 'cqt-fc-ground-apply' : 'cqt-btn-ground-apply');
   applyButton.hidden = !edits.length;
   result.querySelectorAll('[data-ground-select]').forEach((input) => input.addEventListener('change', () => {
    applyButton.disabled = !result.querySelector('[data-ground-select]:checked');
@@ -2575,8 +2578,7 @@ async function applyFootGroundPreview(fullControl) {
  groundFitting = true;
  button.disabled = true;
  try {
-  const result = $(fullControl ? 'cqt-fc-ground-result' : 'cqt-ground-result');
-  const selected = new Set([...result.querySelectorAll('[data-ground-select]:checked')].map((input) => input.dataset.groundSelect));
+  const selected = new Set([...preview.result.querySelectorAll('[data-ground-select]:checked')].map((input) => input.dataset.groundSelect));
   const edits = [];
   for (const row of preview.rows.values()) {
    if (!row.changed || !selected.has(`${row.frame}:${row.id}`)) continue;
@@ -2710,7 +2712,7 @@ async function getGroundFitStates(ids, frame, keyframesOnly, fullControl) {
   .filter((state) => isCuboid(state) && !state.outside && (!keyframesOnly || isKey(state)));
 }
 
-async function runGroundFit(kind, { fullControl = false, row = null, measure = false } = {}) {
+async function runGroundFit(kind, { fullControl = false, row = null, measure = false, confirmed = false } = {}) {
  if (groundFitting || isToolBusy() || fc.busy || fc.harvesting) return fail('Đang xử lý thao tác trước, thử lại khi hoàn tất.');
  if (!Object.hasOwn(GROUND_FIT_CHOICES, kind)) return;
  const job = getJob();
@@ -2755,7 +2757,7 @@ async function runGroundFit(kind, { fullControl = false, row = null, measure = f
   if (!frames) return;
   if (!frames.length) return fail('Chọn frame có cuboid cần xử lý.');
   if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) return;
-  if (needsCloud && !foot && !scene && !safeData() && frames.length > 30 &&
+  if (!confirmed && needsCloud && !foot && !scene && !safeData() && frames.length > 30 &&
       !confirm(`${measure ? 'Đo đáy theo' : 'Fit'} ${label} trên ${frames.length} frame. CVAT có thể tự chuyển frame để nạp point cloud. Tiếp tục?`)) return;
 
   renderGroundResult(report, missing);
@@ -7644,15 +7646,9 @@ const TOOL_SHORTCUTS = [
  ['review-mark', 'Review · Đã duyệt frame', '', '', workspaceMarkReviewed],
  ['review-defer', 'Review · Để sau', '', '', () => workspaceDisposition('deferred')],
  ['ref-pin', 'Tham chiếu · Ghim frame', '', '', workspacePin],
- ['ref-compare', 'Tham chiếu · So sánh', '', '', () => $('cqt-ref-compare').click()],
- ['slice-toggle', 'Hiển thị · Bật/tắt lát cắt', '', '', async () => {
-  await workspaceOpen('view');
-  $('cqt-slice-enable').click();
- }],
- ['face-edit', 'Box · Chỉnh từng mặt', '', '', async () => {
-  await workspaceOpen('object');
-  $('cqt-face-section').open = true;
-  $('cqt-face').focus();
+ ['ref-compare', 'Tham chiếu · So sánh', '', '', async () => {
+  await workspaceOpen('reference');
+  $('cqt-ref-compare').click();
  }],
  ['track-repair', 'Track · Sửa track', '', '', async () => {
   await workspaceOpen('track');
@@ -7668,12 +7664,16 @@ const SHORTCUT_GROUPS = {
  sequence: 'Sau phím mở chuỗi lệnh Toolbox',
  source: 'Fit Ground · Chọn nguồn',
  range: 'Fit Ground · Chọn phạm vi',
+ mode: 'Fit Ground · Chọn cách đặt',
+ direction: 'Fit Ground · Chọn hướng',
 };
 const SHORTCUT_ROWS = {
  direct: TOOL_SHORTCUTS.map(([id, label, direct]) => [id, label, direct]),
  sequence: TOOL_SHORTCUTS.filter(([id]) => id !== 'prefix').map(([id, label, , sequence]) => [id, label, sequence]),
  source: Object.entries(GROUND_FIT_CHOICES).map(([id, label], i) => [id, label, [`Digit${i + 1}`, `Numpad${i + 1}`]]),
  range: Object.entries(groundScopeChoices(false)).map(([id, label], i) => [id, label, [`Digit${i + 1}`, `Numpad${i + 1}`]]),
+ mode: Object.entries(GROUND_FIT_MODES).map(([id, label], i) => [id, label, [`Digit${i + 1}`, `Numpad${i + 1}`]]),
+ direction: Object.entries(GROUND_FIT_DIRECTIONS).map(([id, label], i) => [id, label, [`Digit${i + 1}`, `Numpad${i + 1}`]]),
 };
 const shortcutOverrides = loadOpts(LS.shortcuts, {});
 let shortcutCapture = null;
@@ -7731,43 +7731,57 @@ function transformModeForKey(e) {
  return TOOL_SHORTCUTS.find(([id, , , , , , mode]) => mode && shortcutKeys('direct', id).includes(key))?.[6];
 }
 function runGroundFitShortcut(kind, range) {
- return selectGroundShortcutOptions(kind, range, fc.open && !fc.toolsOpen);
+ return openGroundShortcut({ kind, range });
 }
 
-function selectGroundShortcutOptions(kind, range, fullControl) {
- const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
- setField(prefix + 'kind', kind);
- setField(prefix + 'scope', range);
- syncGroundFitControls(fullControl);
- if (fullControl) {
-  fcSetToolbar(true);
-  fcSelectToolbarTab('ground', true);
- } else {
-  panelApi?.setState('pinned');
-  openToolboxTab('ground');
- }
- return groundUsesPreview(kind) ? previewFootGround(fullControl, true) : runGroundFit(kind, { fullControl });
-}
-
+const GROUND_SHORTCUT_STEPS = ['source', 'range', 'mode', 'direction', 'confirm'];
 let groundShortcut = null;
+
+function groundShortcutChoices({ stage, fullControl, shape }) {
+ if (stage === 'source') return GROUND_FIT_CHOICES;
+ if (stage === 'range') return shape ? { current: 'Frame hiện tại' } : groundScopeChoices(fullControl);
+ if (stage === 'mode') return GROUND_FIT_MODES;
+ if (stage === 'direction') return GROUND_FIT_DIRECTIONS;
+ return {};
+}
+
+function groundShortcutIsCurrent({ job, fullControl, ids, loadRequest, frame }) {
+ return getJob() === job && fc.open === fullControl && (fullControl
+  ? fc.targetId === ids[0] && fc.loadRequest === loadRequest && workspaceContext().frame === frame
+  : getFrame() === frame && selectedOrTarget().join(',') === ids.join(','));
+}
 
 function renderGroundShortcut() {
  const menu = $('cqt-ground-shortcut');
- const { fullControl, shape, kind } = groundShortcut;
- const choices = kind ? (shape ? { current: 'Frame hiện tại' } : groundScopeChoices(fullControl)) : GROUND_FIT_CHOICES;
- menu.innerHTML = `<div id="cqt-ground-shortcut-title" class="cqt-h">${kind
-  ? `Fit Ground · ${GROUND_FIT_CHOICES[kind]} · Chọn phạm vi` : 'Fit Ground · Chọn nguồn'}</div>
-  <div class="cqt-ground-shortcut-options">${Object.entries(choices).map(([value, label]) =>
-   `<button type="button" class="cqt-btn cqt-btn-secondary" data-ground-shortcut-choice="${value}">
-    <kbd class="cqt-kbd">${escapeHtml(shortcutKeys(kind ? 'range' : 'source', value).slice(0, 1).map(shortcutText).join('') || '—')}</kbd>
-    <span>${label}</span></button>`).join('')}</div>
-  <div class="cqt-hint">${kind ? 'Backspace về nguồn · ' : ''}Esc để hủy</div>`;
+ const { stage, fullControl, shape, kind, range, mode, direction, ids, frame } = groundShortcut;
+ const complete = stage === 'confirm';
+ const preview = complete && groundUsesPreview(kind);
+ const summary = [GROUND_FIT_CHOICES[kind], groundShortcutChoices({ stage: 'range', fullControl, shape })[range],
+  GROUND_FIT_MODES[mode], GROUND_FIT_DIRECTIONS[direction]].filter(Boolean).join(' · ');
+ const step = GROUND_SHORTCUT_STEPS.indexOf(stage);
+ const lidarHint = complete && kind === 'lidar' && range !== 'current' && !safeData();
+ menu.innerHTML = `<div class="cqt-label">Bước ${step + 1}/${GROUND_SHORTCUT_STEPS.length} · ${ids.map((id) => '#' + id).join(', ')} · F${frame}</div>
+  <div id="cqt-ground-shortcut-title" class="cqt-h">Fit Ground · ${complete ? 'Kiểm tra và áp dụng' : SHORTCUT_GROUPS[stage].split(' · ')[1]}</div>
+  ${summary ? `<div class="cqt-hint">${escapeHtml(summary)}</div>` : ''}
+  ${lidarHint ? '<p class="cqt-hint">CVAT có thể tạm chuyển frame để nạp point cloud.</p>' : ''}
+  ${complete ? `<div id="cqt-ground-shortcut-result" class="cqt-ground-result" aria-live="polite"${preview ? '' : ' hidden'}>
+    Đang tính xem trước…
+   </div>` : `<div class="cqt-ground-shortcut-options">${Object.entries(groundShortcutChoices(groundShortcut)).map(([value, label]) =>
+    `<button type="button" class="cqt-btn cqt-btn-secondary" data-ground-shortcut-choice="${value}">
+     <kbd class="cqt-kbd">${escapeHtml(shortcutKeys(stage, value).slice(0, 1).map(shortcutText).join('') || '—')}</kbd>
+     <span>${label}</span></button>`).join('')}</div>`}
+  <div class="cqt-row cqt-wrap cqt-ground-shortcut-actions">
+   ${step > 0 ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-shortcut-action="back">Quay lại <kbd class="cqt-kbd">⌫</kbd></button>' : ''}
+   <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-shortcut-action="cancel">Hủy <kbd class="cqt-kbd">Esc</kbd></button>
+   ${complete ? `<button type="button" class="cqt-btn cqt-btn-primary cqt-sm" data-ground-shortcut-action="apply"${preview ? ' disabled' : ''}>Áp dụng <kbd class="cqt-kbd">Enter</kbd></button>` : ''}
+  </div>`;
  menu.hidden = false;
- menu.querySelector('button').focus({ preventScroll: true });
+ const focus = menu.querySelector('[data-ground-shortcut-choice], [data-ground-shortcut-action="apply"]:not(:disabled)') || menu;
+ focus.focus({ preventScroll: true });
 }
 
-function openGroundShortcut() {
- const fullControl = fc.open && !fc.toolsOpen;
+function openGroundShortcut({ kind, range } = {}) {
+ const fullControl = fc.open;
  const ids = fullControl ? [fc.targetId].filter(Number.isInteger) : selectedOrTarget();
  if (!ids.length) return fail('Chọn cuboid mục tiêu trước khi Fit Ground.');
  const states = annotationState()?.annotations?.states ?? [];
@@ -7777,70 +7791,128 @@ function openGroundShortcut() {
  if (!menu) {
   menu = document.createElement('section');
   menu.id = 'cqt-ground-shortcut';
+  menu.tabIndex = -1;
   menu.setAttribute('role', 'group');
   menu.setAttribute('aria-labelledby', 'cqt-ground-shortcut-title');
   menu.addEventListener('click', guarded((e) => {
-   const button = e.target.closest('button[data-ground-shortcut-choice]');
-   if (button && groundShortcut) return chooseGroundShortcut(button.dataset.groundShortcutChoice);
+   const choice = e.target.closest('[data-ground-shortcut-choice]');
+   if (choice) return chooseGroundShortcut(choice.dataset.groundShortcutChoice);
+   const action = e.target.closest('[data-ground-shortcut-action]')?.dataset.groundShortcutAction;
+   if (action === 'back') return backGroundShortcut();
+   if (action === 'cancel') return closeGroundShortcut();
+   if (action === 'apply') return applyGroundShortcut();
   }));
   root.appendChild(menu);
  }
- groundShortcut = { fullControl, shape, kind: null, ids, loadRequest: fc.loadRequest, frame: getFrame(), focus: document.activeElement };
+ clearFootGroundPreview();
+ groundShortcut = { fullControl, shape, kind, range: shape ? 'current' : range, ids,
+  job: getJob(), loadRequest: fc.loadRequest, frame: fullControl ? workspaceContext().frame : getFrame(),
+  stage: kind ? 'mode' : 'source', focus: document.activeElement };
  renderGroundShortcut();
 }
 
-function closeGroundShortcut() {
- const { focus } = groundShortcut;
+function closeGroundShortcut(restoreFocus = true) {
+ const wizard = groundShortcut;
+ if (!wizard || wizard.applying) return;
  groundShortcut = null;
- $('cqt-ground-shortcut').hidden = true;
- focus?.focus({ preventScroll: true });
+ const menu = $('cqt-ground-shortcut');
+ menu.hidden = true;
+ menu.replaceChildren();
+ if (wizard.stage === 'confirm' && groundUsesPreview(wizard.kind)) clearFootGroundPreview();
+ if (restoreFocus) wizard.focus?.focus({ preventScroll: true });
+}
+
+function backGroundShortcut() {
+ const wizard = groundShortcut;
+ if (!wizard || wizard.computing || wizard.applying || wizard.stage === 'source') return;
+ if (wizard.stage === 'confirm') clearFootGroundPreview();
+ wizard.stage = GROUND_SHORTCUT_STEPS[GROUND_SHORTCUT_STEPS.indexOf(wizard.stage) - 1];
+ const fields = ['kind', 'range', 'mode', 'direction'];
+ for (const field of fields.slice(GROUND_SHORTCUT_STEPS.indexOf(wizard.stage))) wizard[field] = undefined;
+ renderGroundShortcut();
 }
 
 async function chooseGroundShortcut(choice) {
- const { fullControl, kind, ids, loadRequest, frame } = groundShortcut;
- if (!kind) {
-  groundShortcut.kind = choice;
-  renderGroundShortcut();
+ const wizard = groundShortcut;
+ if (!wizard || !Object.hasOwn(groundShortcutChoices(wizard), choice)) return;
+ if (!groundShortcutIsCurrent(wizard)) {
+  closeGroundShortcut();
+  return fail('Object hoặc frame đã đổi. Mở lại phím tắt Fit Ground.');
+ }
+ const fields = { source: 'kind', range: 'range', mode: 'mode', direction: 'direction' };
+ wizard[fields[wizard.stage]] = choice;
+ wizard.stage = GROUND_SHORTCUT_STEPS[GROUND_SHORTCUT_STEPS.indexOf(wizard.stage) + 1];
+ renderGroundShortcut();
+ if (wizard.stage !== 'confirm') return;
+ const prefix = wizard.fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
+ for (const [field, value] of Object.entries({ kind: wizard.kind, scope: wizard.range, mode: wizard.mode, direction: wizard.direction })) {
+  setField(prefix + field, value);
+ }
+ syncGroundFitControls(wizard.fullControl);
+ if (!groundUsesPreview(wizard.kind)) {
+  $('cqt-ground-shortcut').querySelector('[data-ground-shortcut-action="apply"]').focus({ preventScroll: true });
   return;
  }
- closeGroundShortcut();
- const unchanged = fullControl
-  ? fc.open && !fc.toolsOpen && fc.targetId === ids[0] && fc.loadRequest === loadRequest
-  : getFrame() === frame && selectedOrTarget().join(',') === ids.join(',');
- if (!unchanged) return fail('Object hoặc frame đã đổi. Mở lại phím tắt Fit Ground.');
- return selectGroundShortcutOptions(kind, choice, fullControl);
+ const menu = $('cqt-ground-shortcut');
+ const result = $('cqt-ground-shortcut-result');
+ const apply = menu.querySelector('[data-ground-shortcut-action="apply"]');
+ wizard.computing = true;
+ try {
+  await previewFootGround(wizard.fullControl, true, { result, apply });
+ } finally {
+  wizard.computing = false;
+  if (groundShortcut === wizard) {
+   if (!result.querySelector('[data-foot-ground-preview]')) result.textContent = 'Không có kết quả xem trước. Kiểm tra thông báo hoặc quay lại đổi tuỳ chọn.';
+   if (apply.hidden) result.insertAdjacentHTML('beforeend', '<p class="cqt-hint">Không có frame đủ điều kiện để áp dụng.</p>');
+  }
+ }
+}
+
+async function applyGroundShortcut() {
+ const wizard = groundShortcut;
+ const button = $('cqt-ground-shortcut')?.querySelector('[data-ground-shortcut-action="apply"]');
+ if (!wizard || !button || button.hidden || button.disabled || wizard.applying) return;
+ if (!groundShortcutIsCurrent(wizard)) {
+  closeGroundShortcut();
+  return fail('Object hoặc frame đã đổi. Mở lại phím tắt Fit Ground.');
+ }
+ wizard.applying = true;
+ $('cqt-ground-shortcut').querySelectorAll('button').forEach((control) => { control.disabled = true; });
+ try {
+  if (groundUsesPreview(wizard.kind)) await applyFootGroundPreview(wizard.fullControl);
+  else await runGroundFit(wizard.kind, { fullControl: wizard.fullControl, confirmed: true });
+ } finally {
+  wizard.applying = false;
+  if (groundShortcut === wizard) closeGroundShortcut();
+ }
 }
 
 function handleGroundShortcutKey(e) {
- if (!groundShortcut) return false;
+ if (!groundShortcut || !e.isTrusted) return false;
+ const menu = $('cqt-ground-shortcut');
  const key = eventShortcut(e);
- const group = groundShortcut.kind ? 'range' : 'source';
- const button = [...$('cqt-ground-shortcut').querySelectorAll('[data-ground-shortcut-choice]')]
-  .find((option) => shortcutKeys(group, option.dataset.groundShortcutChoice).includes(key));
+ const button = [...menu.querySelectorAll('[data-ground-shortcut-choice]')]
+  .find((option) => shortcutKeys(groundShortcut.stage, option.dataset.groundShortcutChoice).includes(key));
  if (button) {
   swallow(e);
-  if (!e.repeat) void guarded(chooseGroundShortcut)(button.dataset.groundShortcutChoice);
+  if (!e.repeat) button.click();
   return true;
  }
- if (e.key === 'Escape') {
-  swallow(e);
-  closeGroundShortcut();
-  return true;
- }
- if (e.key === 'Backspace' && groundShortcut.kind) {
+ if (e.key === 'Escape' || e.key === 'Backspace' ||
+     (e.key === 'Enter' && groundShortcut.stage === 'confirm' &&
+      (!e.target.closest?.('#cqt-ground-shortcut button') ||
+       e.target.matches?.('[data-ground-shortcut-action="apply"]')))) {
   swallow(e);
   if (!e.repeat) {
-   groundShortcut.kind = null;
-   renderGroundShortcut();
+   if (e.key === 'Escape') closeGroundShortcut();
+   else if (e.key === 'Backspace') backGroundShortcut();
+   else menu.querySelector('[data-ground-shortcut-action="apply"]')?.click();
   }
   return true;
  }
- if (key && !e.ctrlKey && !e.metaKey && !e.altKey && /^\w$/.test(e.key)) {
-  swallow(e);
-  return true;
- }
- if (key && (e.ctrlKey || e.metaKey || e.altKey)) closeGroundShortcut();
- return false;
+ if (key && !menu.contains(e.target)) swallow(e);
+ else if (key && !['Enter', 'Tab'].includes(e.key) && !e.key.startsWith('Arrow') && e.code !== 'Space') swallow(e);
+ return true;
 }
 
 let shortcutUntil = 0;
@@ -7957,7 +8029,7 @@ function runToolShortcut(e) {
 function shortcutSettingsHTML() {
  return `<details id="cqt-shortcut-editor" class="cqt-card cqt-disclosure">
   <summary>Phím tắt</summary>
-  <p class="cqt-hint">Bấm vào phím để đổi. Phím mở Fit Ground, nguồn và phạm vi được gán riêng. Thiết lập lưu trên trình duyệt này.</p>
+  <p class="cqt-hint">Bấm vào phím để đổi. Có thể gán riêng phím mở Fit Ground, nguồn, phạm vi, cách đặt và hướng. Thiết lập lưu trên trình duyệt này.</p>
   <p id="cqt-shortcut-status" class="cqt-hint" role="status"></p>
   ${Object.entries(SHORTCUT_GROUPS).map(([group, label]) => `<details class="cqt-disclosure">
    <summary>${label}</summary>
@@ -7986,7 +8058,7 @@ function onKeyDown(e) {
   return;
  }
  if (handleGroundShortcutKey(e)) return;
- if (e.key === 'Escape' && !$('cqt-modal') && (!isTyping(e) || e.target.id === 'cqt-slice-enable')) {
+ if (e.key === 'Escape' && !$('cqt-modal') && (!isTyping(e) || e.target.closest?.('#cqt-fc-reference'))) {
   if (workspaceRegionPicking) {
    workspaceRegionPicking = null;
    if (fc.drag?.type === 'ground-region') fc.drag = null;
@@ -7995,11 +8067,9 @@ function onKeyDown(e) {
    swallow(e);
    return;
   }
-  if (workspaceClearFace()) { swallow(e); return; }
-  if (workspaceSlice) {
+  if (fc.open && !$('cqt-fc-reference').hidden) {
    swallow(e);
-   $('cqt-slice-enable').checked = false;
-   workspaceReadSlice();
+   fcSetReference(false, true);
    return;
   }
  }
@@ -8059,7 +8129,7 @@ function installGlobalHandlers() {
  listen(window, 'keydown', onKeyDown, true);
  listen(window, 'blur', () => {
   shortcutUntil = 0;
-  if (groundShortcut) closeGroundShortcut();
+  if (groundShortcut) closeGroundShortcut(false);
   transformRequest++;
   if (xf.active) cancelTransform();
  });
@@ -8072,7 +8142,7 @@ function installGlobalHandlers() {
   if (getExplicitAnchorIds().length > 0 && !stealthUI && !fc.open) renderAnchorOverlay();
  }, { passive: true });
  listen(window, 'pointerdown', (e) => {
-  if (groundShortcut && !e.target.closest?.('#cqt-ground-shortcut')) closeGroundShortcut();
+  if (groundShortcut && !e.target.closest?.('#cqt-ground-shortcut')) closeGroundShortcut(false);
   if (!xf.active) return;
   swallow(e);
   // macOS biến Ctrl + Click trái thành button 2 (chuột phải) => vẫn coi là xác nhận
@@ -8780,6 +8850,7 @@ async function fcToggleTools() {
 }
 
 function openToolboxTab(tab) {
+ if (tab === 'reference' && fc.open) return fcSetReference(true, true);
  const button = root.querySelector(`#cvat-quicktool-panel .cqt-tab[data-tab="${tab}"]`);
  button?.click();
  button?.focus({ preventScroll: true });
@@ -9585,8 +9656,6 @@ function fcRender3D(row, canvas, g, pal) {
   delete canvas.dataset.groundScan;
  }
  workspaceDrawGround(ctx, row, toScreen3D, '3d');
- workspaceDrawSliceBounds(ctx, row, toScreen3D);
- workspaceDrawFace(ctx, row, toScreen3D);
  const preview = workspaceGroundRow(row);
  if (preview?.changed && !row.draft && fcSamePoints(preview.before, row.base)) {
   drawWireBox(preview.after, FOOT_GROUND_COLOR, FOOT_GROUND_COLOR, [5, 4]);
@@ -9874,22 +9943,18 @@ function fcRenderView(row, canvas) {
  }
 
  // Point cloud: lọc hành lang độ sâu (Slice) + phân loại trong box (sáng) / mặt đất / xung quanh
- const slice = workspaceSlice?.id === (fc.open ? fc.targetId : dock.id) ? workspaceSlice : null;
- if (slice) canvas.dataset.slice = `${['X','Y','Z'][slice.axis]} · ${slice.offset.toFixed(2)} m`;
- else delete canvas.dataset.slice;
  const wideProjection = fcLayout() !== 'table' && fc.cfg.fullSceneDetail &&
   (fc.cfg.slice === 'tight' || fc.cfg.slice === 'scene');
  const fullCloud = row.projectionCloud || (wideProjection && fullSceneCache.get(sceneKey(row.frame)));
  const cloud = fullCloud || fcCloud(row);
  canvas.dataset.cloudDensity = fullCloud ? 'full' : cloud ? 'near' : 'empty';
- if (fullCloud && !slice) {
+ if (fullCloud) {
   drawFullProjection(ctx, canvas, g, pal, row, plane, fullCloud);
  } else if (cloud) {
   // During a drag, keep the cloud fixed and move only the cuboid overlay.
   const sampleBox = anchor;
   const sz = fc.cfg.pointSize;
-  const key = [g.cw, g.ch, g.k, g.cx, g.cy, fc.cfg.slice, sz, plane?.a, plane?.b, plane?.c,
-   slice?.axis, slice?.offset, slice?.width].join('|');
+  const key = [g.cw, g.ch, g.k, g.cx, g.cy, fc.cfg.slice, sz, plane?.a, plane?.b, plane?.c].join('|');
   let paths = projectionPaths.get(canvas);
   if (paths?.cloud !== cloud || paths?.anchor !== anchor || paths?.key !== key) {
    const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
@@ -9905,8 +9970,7 @@ function fcRenderView(row, canvas) {
     const ew = R[0][2] * ex + R[1][2] * ey + R[2][2] * ez;
     const isIn = Math.abs(eu) <= hl && Math.abs(ev) <= hw && Math.abs(ew) <= hh;
     if (isIn && view === 'top') nIn++;
-    if (slice ? Math.abs((slice.axis === 0 ? eu : slice.axis === 1 ? ev : ew) - slice.offset) > slice.width / 2 :
-        (!isIn && !fcPassSlice(view, eu, ev, ew, hl, hw, hh))) continue;
+    if (!isIn && !fcPassSlice(view, eu, ev, ew, hl, hw, hh)) continue;
     const [h, vert] = fcProject(view, ex * ac + ey * as, -ex * as + ey * ac, ez);
     const sx = g.cx + h * g.k, sy = g.cy - vert * g.k;
     if (sx < 0 || sy < 0 || sx > g.cw || sy > g.ch) continue;
@@ -9926,7 +9990,6 @@ function fcRenderView(row, canvas) {
  }
 
  workspaceDrawGround(ctx, row, toScreen, view);
- workspaceDrawFace(ctx, row, toScreen);
  const pick = fc.drag?.type === 'ground-region' && fc.drag.canvas === canvas ? fc.drag : null;
  if (pick) {
   const rect = canvas.getBoundingClientRect();
@@ -9934,11 +9997,6 @@ function fcRenderView(row, canvas) {
   ctx.setLineDash([4, 3]);
   ctx.strokeRect(pick.start[0] - rect.left, pick.start[1] - rect.top, pick.end[0] - pick.start[0], pick.end[1] - pick.start[1]);
   ctx.setLineDash([]);
- }
- if (slice) {
-  ctx.fillStyle = pal.boxStroke;
-  ctx.font = '11px monospace';
-  ctx.fillText('Lát ' + canvas.dataset.slice, 8, g.ch - 8);
  }
  const groundPreview = workspaceGroundRow(row);
  if (groundPreview?.changed && workspaceEvidence) {
@@ -10298,7 +10356,6 @@ function fcUpdateFocusNav() {
  $('cqt-fc-focus-prev').disabled = position <= 0;
  $('cqt-fc-focus-next').disabled = position < 0 || position >= fc.filteredRows.length - 1;
  if (footGroundPreview?.fullControl && footGroundPreview.key !== footGroundSelectionKey(true)) clearFootGroundPreview();
- if (workspaceFaceDraft && workspaceFaceDraft.frame !== workspaceContext().frame) workspaceClearFace();
  refreshGroundScanRing();
 }
 
@@ -11056,6 +11113,7 @@ function fullControlHTML() { return `
    </div>
   </div>
   <div class="cqt-fc-head-actions">
+   <button type="button" id="cqt-fc-reference-toggle" class="cqt-btn cqt-btn-secondary cqt-sm" aria-expanded="false" aria-controls="cqt-fc-reference" aria-label="Tham chiếu" title="Tham chiếu · Ghim và so sánh frame">${ICONS.pin}<span>Tham chiếu</span></button>
    <button id="cqt-fc-tools" class="cqt-btn cqt-btn-secondary cqt-sm" aria-pressed="false" aria-controls="cvat-quicktool-panel" aria-label="Công cụ Toolbox" title="Box, Ground, Track, QA và Cài đặt của Toolbox">${ICONS.cuboid}<span>Công cụ Toolbox</span></button>
    <button id="cqt-fc-undo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled aria-label="Undo" title="Hoàn tác thao tác gần nhất (${OPTION_KEY}Z)">${ICONS.undo}<span>Undo</span></button>
    <button id="cqt-fc-redo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled aria-label="Redo" title="Làm lại thao tác vừa hoàn tác (${shortcutLabel('direct', 'redo')})">${ICONS.redo}<span>Redo</span></button>
@@ -11066,6 +11124,12 @@ function fullControlHTML() { return `
   </div>
  </div>
 
+ <aside id="cqt-fc-reference" aria-labelledby="cqt-fc-reference-title" hidden>
+  <div class="cqt-row cqt-fc-reference-head">
+   <strong id="cqt-fc-reference-title">Tham chiếu</strong>
+   <button type="button" id="cqt-fc-reference-close" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" aria-label="Đóng Tham chiếu">×</button>
+  </div>
+ </aside>
  <div id="cqt-fc-toolbar" class="cqt-fc-toolbar" hidden>
  <div class="cqt-fc-bar">
   <div class="cqt-fc-seg" data-fc-track-only>
@@ -11089,18 +11153,17 @@ function fullControlHTML() { return `
  <div id="cqt-fc-limits" hidden></div>
  <div class="cqt-fc-bar cqt-fc-tabs" role="tablist" aria-label="Nhóm công cụ Full Control">
   ${Object.entries(workspaceTabs).map(([name, label]) =>
-   `<button type="button" role="tab" class="cqt-tab ${name === 'view' ? 'active' : ''}" id="cqt-fc-tab-${name}" data-fc-toolbar-tab="${name}" aria-selected="${name === 'view'}" aria-controls="cqt-fc-${name}-controls" tabindex="${name === 'view' ? 0 : -1}">${label}</button>`).join('')}
+   `<button type="button" role="tab" class="cqt-tab ${name === 'object' ? 'active' : ''}" id="cqt-fc-tab-${name}" data-fc-toolbar-tab="${name}" aria-selected="${name === 'object'}" aria-controls="cqt-fc-${name}-controls" tabindex="${name === 'object' ? 0 : -1}">${label}</button>`).join('')}
  </div>
- ${['object', 'reference', 'qa'].map((name) =>
-  `<section id="cqt-fc-${name}-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-${name}" hidden>
+ ${['object', 'qa'].map((name) =>
+  `<section id="cqt-fc-${name}-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-${name}"${name === 'object' ? '' : ' hidden'}>
    <div class="cqt-fc-bar"><button class="cqt-btn cqt-btn-secondary cqt-sm" type="button" data-workspace-inspector="${name}">Mở ${workspaceTabs[name]}</button>
    ${name === 'object' ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-pin-size">Chốt LWH</button>' : ''}
-   ${name === 'reference' ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-pin-reference">Ghim frame</button>' : ''}
    ${name === 'qa' ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-mark-review">Đã duyệt</button><button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-next-issue">Vấn đề ›</button>' : ''}</div>
   </section>`).join('')}
- <section id="cqt-fc-view-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-view">
+ <details id="cqt-fc-view-controls" class="cqt-disclosure">
+ <summary>Tùy chọn khung nhìn</summary>
  <div class="cqt-fc-bar">
-  <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-workspace-inspector="view">Lát cắt / Camera</button>
   <label class="cqt-fc-ctl" title="Chiều cao ưu tiên của khung trong mỗi frame">Cỡ hàng <input type="range" id="cqt-fc-rowh" min="100" max="360" step="10" /></label>
   <label class="cqt-fc-ctl" title="Phóng to hình chiếu (hoặc Alt/Ctrl + lăn chuột trên danh sách)">Zoom <input type="range" id="cqt-fc-zoom" min="0.5" max="4" step="0.1" /><span id="cqt-fc-zoom-val" class="cqt-label"></span></label>
   <label class="cqt-fc-ctl" title="Chỉnh cỡ điểm. Xem phím đã gán trong Cài đặt → Phím tắt.">Cỡ điểm <input type="range" id="cqt-fc-point-size" aria-label="Cỡ điểm" min="1" max="${FC_MAX_POINT_SIZE}" step="1" /></label>
@@ -11146,7 +11209,7 @@ function fullControlHTML() { return `
    </select>
   </label>
  </div>
- </section>
+ </details>
 
  <section id="cqt-fc-track-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-track" hidden>
  <div class="cqt-fc-bar cqt-fc-batch">
@@ -11363,6 +11426,25 @@ function fcSetLayout(next) {
  }
 }
 
+function fcSetReference(open, focus = false) {
+ const panel = $('cqt-fc-reference');
+ const toggle = $('cqt-fc-reference-toggle');
+ const controls = $('cqt-reference-controls');
+ if (!panel || !controls) return;
+ const changed = panel.hidden === open;
+ if (changed && open) {
+  panel.append(controls);
+  workspaceRenderPins();
+ }
+ panel.hidden = !open;
+ toggle.setAttribute('aria-expanded', String(open));
+ if (changed) {
+  if (open) workspaceSync();
+  else root.querySelector('[data-pane="reference"]').append(controls);
+ }
+ if (focus) (open ? $('cqt-ref-pin') : toggle).focus({ preventScroll: true });
+}
+
 function fcSelectToolbarTab(name, focus = false) {
  for (const button of fc.el.querySelectorAll('[data-fc-toolbar-tab]')) {
   const active = button.dataset.fcToolbarTab === name;
@@ -11454,6 +11536,11 @@ function fcBindWindow(el) {
   fcRerenderVisible();
  });
  fc.resizeObserver.observe(list);
+ const alignReference = new ResizeObserver(([entry]) => {
+  el.style.setProperty('--cqt-fc-head-height', (entry.borderBoxSize?.[0]?.blockSize ?? head.offsetHeight) + 'px');
+ });
+ alignReference.observe(head);
+ scope.signal.addEventListener('abort', () => alignReference.disconnect(), { once: true });
  list.addEventListener('scroll', () => {
   const layout = fcLayout();
   if ((layout === 'focus' || layout === 'stacked') && list.clientHeight && !fc.drag) {
@@ -11479,7 +11566,8 @@ function fcBindWindow(el) {
   const { id, frame } = workspaceContext();
   return fetchLWH(id, frame);
  });
- on('cqt-fc-pin-reference', workspacePin);
+ on('cqt-fc-reference-toggle', () => fcSetReference($('cqt-fc-reference').hidden, true));
+ on('cqt-fc-reference-close', () => fcSetReference(false, true));
  on('cqt-fc-mark-review', workspaceMarkReviewed);
  on('cqt-fc-next-issue', () => workspaceIssueStep(1));
  on('cqt-fc-context-prev', () => fcStepFocus(-1));
@@ -11779,7 +11867,6 @@ function fcBindWindow(el) {
   fcSchedule([row], view);
  });
  list.addEventListener('wheel', (e) => {
-  if (workspaceWheelSlice(e)) return;
   const canvas = e.target.closest?.('canvas[data-view]');
   const modified = e.altKey || e.ctrlKey || e.metaKey;
   const view = canvas?.dataset.view;
@@ -11915,7 +12002,8 @@ function closeFullControl() {
  if (!fc.el) return;
  fcShowLimits(false);
  if (fc.toolsOpen) void fcToggleTools();
- if (groundShortcut?.fullControl) closeGroundShortcut();
+ if (groundShortcut?.fullControl) closeGroundShortcut(false);
+ fcSetReference(false);
  fc.open = false;
  fc.loadRequest++;
  clearTimeout(fc.toolbarTimer);
@@ -12055,7 +12143,6 @@ function dockBindView(e, view) {
   }
  }));
  box.addEventListener('wheel', (ev) => {
-  if (workspaceWheelSlice(ev)) return;
   ev.preventDefault();
   ev.stopPropagation();
   if (ev.ctrlKey || ev.altKey || ev.metaKey) {
@@ -13949,7 +14036,6 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
 <!-- Segmented Tabs (shadcn TabsList) -->
 <div class="cqt-tabs-wrap">
 <div class="cqt-tabs">
-<button class="cqt-tab" data-tab="view">Hiển thị</button>
 <button class="cqt-tab active" data-tab="object">Box</button>
 <button class="cqt-tab" data-tab="ground">Ground</button>
 <button class="cqt-tab" data-tab="track">Track</button>
@@ -13963,19 +14049,6 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
 <div id="cvat-quicktool-body">
 <!-- ================= 1. BOX (LWH, ANCHOR RESIZE, MICRO-NUDGE, SUB-LABEL) ================= -->
 <div class="cqt-pane active" data-pane="object">
-<details class="cqt-card cqt-disclosure" id="cqt-face-section">
- <summary>Chỉnh từng mặt cuboid</summary>
- <div class="cqt-row cqt-wrap">
-  <label class="cqt-col"><span class="cqt-label">Mặt</span><select id="cqt-face" class="cqt-input">
-   <option value="0:1">Đầu</option><option value="0:-1">Đuôi</option><option value="1:1">Trái</option>
-   <option value="1:-1">Phải</option><option value="2:1">Nóc</option><option value="2:-1">Đáy</option>
-  </select></label>
-  <label class="cqt-col"><span class="cqt-label">Dịch mặt (m)</span><input id="cqt-face-delta" class="cqt-input" type="number" step="0.01" value="0.05"></label>
- </div>
- <label class="cqt-check"><input id="cqt-face-sym" type="checkbox"> Đối xứng qua tâm</label>
- <div class="cqt-row cqt-wrap"><button type="button" id="cqt-face-show" class="cqt-btn cqt-btn-secondary cqt-sm">Xem trước</button><button type="button" id="cqt-face-apply" class="cqt-btn cqt-btn-primary cqt-sm">Áp dụng</button><button type="button" id="cqt-face-cancel" class="cqt-btn cqt-btn-secondary cqt-sm">Hủy</button></div>
- <small id="cqt-face-preview" role="status"></small>
-</details>
 <!-- Cụm 1: Smart Snap & Clipboard -->
 <div class="cqt-card">
 <div class="cqt-row">
@@ -14290,20 +14363,8 @@ ${lidarGroundFields()}
 </details>
 </div>
 <!-- ================= 4. QA (COLLAPSIBLE + 2-COLUMN GRID) ================= -->
-<div class="cqt-pane" data-pane="view">
- <div class="cqt-card">
-  <div class="cqt-row cqt-wrap"><button type="button" id="cqt-view-projection" class="cqt-btn cqt-btn-secondary cqt-sm">Góc CVAT / Tool</button><button type="button" id="cqt-view-focus" class="cqt-btn cqt-btn-secondary cqt-sm">Focus</button></div>
-  <label class="cqt-check"><input id="cqt-slice-enable" type="checkbox"> Cuộn để quét lát</label>
-  <div class="cqt-row cqt-wrap">
-   <label class="cqt-col"><span class="cqt-label">Trục local</span><select id="cqt-slice-axis" class="cqt-input"><option value="0">X · Dọc</option><option value="1" selected>Y · Ngang</option><option value="2">Z · Cao</option></select></label>
-   <label class="cqt-col"><span class="cqt-label">Vị trí (m)</span><input type="number" id="cqt-slice-offset" class="cqt-input" step="0.05" value="0"></label>
-   <label class="cqt-col"><span class="cqt-label">Độ dày (m)</span><input type="number" id="cqt-slice-width" class="cqt-input" min="0.02" max="2" step="0.01" value="0.2"></label>
-  </div>
-  <span class="cqt-hint">Lát cắt áp dụng trên Top, Side và Front của Tool.</span>
- </div>
-</div>
 <div class="cqt-pane" data-pane="reference">
- <div class="cqt-card">
+ <div class="cqt-card" id="cqt-reference-controls">
   <span id="cqt-ref-status" role="status"></span>
   <div class="cqt-row cqt-wrap"><button type="button" id="cqt-ref-pin" class="cqt-btn cqt-btn-primary cqt-sm">Ghim frame</button><button type="button" id="cqt-ref-suggest" class="cqt-btn cqt-btn-secondary cqt-sm">Gợi ý frame</button></div>
   <label class="cqt-col"><span class="cqt-label">Frame chuẩn</span><select id="cqt-ref-pins" class="cqt-input"></select></label>
@@ -14595,12 +14656,10 @@ let workspaceWasSaving = false;
 let workspaceIssueIndex = -1;
 let workspaceScanCancelled = false;
 let workspaceTrackDraft = null;
-let workspaceFaceDraft = null;
-let workspaceSlice = null;
 let workspaceRegion = null;
 let workspaceRegionPicking = null;
 let workspaceEvidence = true;
-const workspaceTabs = { view: 'Hiển thị', object: 'Box', ground: 'Ground', track: 'Track', reference: 'Tham chiếu', qa: 'Review' };
+const workspaceTabs = { object: 'Box', ground: 'Fit Ground', track: 'Track', qa: 'Review' };
 
 function workspaceContext() {
  const frame = fc.open ? (fcLayout() === 'table' ? (fc.lastClicked ?? fc.focusFrame ?? getFrame()) : (fc.focusFrame ?? getFrame())) : getFrame();
@@ -14608,6 +14667,7 @@ function workspaceContext() {
 }
 
 async function workspaceOpen(tab) {
+ if (tab === 'reference' && fc.open) return fcSetReference(true, true);
  if (stealthUI) togglePanel();
  if (fc.open && Number.isInteger(fc.targetId)) {
   const { id, frame } = workspaceContext();
@@ -15079,6 +15139,7 @@ function workspaceRenderPins() {
 }
 
 async function workspacePin() {
+ if (fc.open) fcSetReference(true);
  const [state] = await workspaceStates();
  if (!state) return fail('Chọn cuboid hiện diện để ghim frame.');
  const pins = workspacePins.get(state.clientID) || [];
@@ -15127,110 +15188,6 @@ async function workspaceSuggestReferences() {
   button.addEventListener('click', guarded(() => workspaceGo(id, item.frame)));
  }
  if (!scores.length) output.textContent = 'Chưa có cloud trong bộ nhớ đệm để gợi ý.';
-}
-
-function workspaceDrawFace(ctx, row, project) {
- const draft = workspaceFaceDraft;
- if (!draft || draft.row !== row) return;
- const axis = draft.axis, sign = draft.sign, p = draft.after;
- const others = [0, 1, 2].filter((index) => index !== axis);
- const poly = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([u,v]) => {
-  const local = [];
-  local[axis] = sign * p[6 + axis] / 2;
-  local[others[0]] = u * p[6 + others[0]] / 2;
-  local[others[1]] = v * p[6 + others[1]] / 2;
-  return project(...fcBoxPoint(p, ...local));
- });
- fcStrokePoly(ctx, poly, '#fbbf24', 2, [4, 3]);
-}
-
-function workspaceDrawSliceBounds(ctx, row, project) {
- const slice = workspaceSlice;
- if (!slice || slice.id !== (fc.open ? fc.targetId : dock.id)) return;
- const p = row.base;
- const others = [0, 1, 2].filter((axis) => axis !== slice.axis);
- for (const sign of [-1, 1]) {
-  const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([u, v]) => {
-   const local = [];
-   local[slice.axis] = slice.offset + sign * slice.width / 2;
-   local[others[0]] = u * (p[6 + others[0]] / 2 + 0.5);
-   local[others[1]] = v * (p[6 + others[1]] / 2 + 0.5);
-   return project(...fcBoxPoint(p, ...local));
-  });
-  fcStrokePoly(ctx, corners, '#c084fc', 1.3, [3, 3]);
- }
-}
-
-function workspaceReadSlice() {
- if (!isChecked('cqt-slice-enable')) {
-  workspaceSlice = null;
- } else {
-  const axis = Number(val('cqt-slice-axis'));
-  const offset = numVal('cqt-slice-offset');
-  const width = numVal('cqt-slice-width');
-  if (![0, 1, 2].includes(axis) || !Number.isFinite(offset) || !(width >= 0.02 && width <= 2)) {
-   return fail('Độ dày lát cắt từ 0,02–2 m và offset phải là số.');
-  }
-  workspaceSlice = { axis, offset, width, id: workspaceContext().id };
- }
- fcRerenderVisible();
- scheduleDockRender();
-}
-
-function workspaceWheelSlice(e) {
- if (!workspaceSlice || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey || !e.deltaY ||
-     !e.target.closest?.('canvas[data-view]:not([data-view="3d"])')) return false;
- if (workspaceSlice.id !== workspaceContext().id || fc.drag) return false;
- e.preventDefault();
- e.stopPropagation();
- const offset = clamp(workspaceSlice.offset + Math.sign(e.deltaY) * 0.05, -100, 100);
- setField('cqt-slice-offset', offset.toFixed(2));
- workspaceReadSlice();
- return true;
-}
-
-async function workspaceFace(apply = false) {
- if (isToolBusy() || fc.drag) return fail('Đợi thao tác đang chạy hoàn tất.');
- const [state] = await workspaceStates();
- if (!state || state.lock || state.isGroundTruth) return fail('Chọn cuboid có thể chỉnh.');
- const [axis, sign] = val('cqt-face').split(':').map(Number);
- const delta = numVal('cqt-face-delta');
- if (![0, 1, 2].includes(axis) || !Number.isFinite(delta)) return fail('Nhập độ dịch chuyển theo mét.');
- const before = annotationFingerprint(state);
- const p = state.points;
- const normal = rotationMatrix(p[3], p[4], p[5]).map((row) => row[axis] * sign);
- const after = resizeFace(p, normal, axis, delta, isChecked('cqt-face-sym'));
- const row = fc.open ? fcRowByFrame(state.frame) : dock.row;
- if (!apply) {
-  workspaceClearFace();
-  workspaceFaceDraft = { before, after, frame: state.frame, id: state.clientID, row, axis, sign };
-  if (row && row.frame === state.frame) row.draft = after;
-  fcRerenderVisible();
-  scheduleDockRender();
-  $('cqt-face-preview').textContent = `#${state.clientID} · F${state.frame} · ${fmtLWH(...p.slice(6, 9))} → ${fmtLWH(...after.slice(6, 9))}`;
-  $('cqt-face-apply').disabled = false;
-  return;
- }
- const draft = workspaceFaceDraft;
- if (!draft || draft.id !== state.clientID || draft.frame !== state.frame || draft.before !== before ||
-     !fcSamePoints(draft.after, after)) return fail('Box hoặc thông số đã đổi. Xem trước lại.');
- workspaceClearFace();
- const batch = createBatch('Chỉnh mặt cuboid');
- await batch.edit(state, state.frame, (current) => fcSetPoints(current, after));
- const result = await batch.finish();
- setStatus(`Đã chỉnh ${result.changed} cuboid · F${state.frame}.` + editSuffix(result), result.changed ? 'success' : 'warn');
-}
-
-function workspaceClearFace() {
- if (!workspaceFaceDraft) return false;
- const { row, after } = workspaceFaceDraft;
- if (row?.draft === after) row.draft = null;
- workspaceFaceDraft = null;
- $('cqt-face-preview').textContent = '';
- $('cqt-face-apply').disabled = true;
- fcRerenderVisible();
- scheduleDockRender();
- return true;
 }
 
 async function workspaceTrackCandidates() {
@@ -15579,14 +15536,6 @@ function workspaceBind() {
  });
  on('cqt-ref-view', () => { if (workspaceCompareSelection) $('cqt-ref-compare').click(); }, 'change');
  on('cqt-ref-pins', () => { if (workspaceCompareSelection) $('cqt-ref-compare').click(); }, 'change');
- on('cqt-view-projection', toggleDockViews);
- on('cqt-view-focus', () => cameraView('focus'));
- for (const id of ['cqt-slice-enable', 'cqt-slice-offset', 'cqt-slice-width', 'cqt-slice-axis']) on(id, workspaceReadSlice, 'change');
- on('cqt-face-show', () => workspaceFace());
- on('cqt-face-apply', () => workspaceFace(true));
- on('cqt-face-cancel', workspaceClearFace);
- $('cqt-face-apply').disabled = true;
- for (const id of ['cqt-face', 'cqt-face-sym', 'cqt-face-delta']) on(id, workspaceClearFace, 'input');
  on('cqt-repair-show', workspaceTrackPreview);
  on('cqt-repair-suggest', workspaceTrackCandidates);
  on('cqt-repair-apply', workspaceTrackApply);
@@ -15690,13 +15639,6 @@ function workspaceSync() {
  if (workspaceRegionPicking && (workspaceRegionPicking.id !== context.id || workspaceRegionPicking.frame !== context.frame)) {
   workspaceRegionPicking = null;
   if (fc.drag?.type === 'ground-region') fc.drag = null;
- }
- if (workspaceFaceDraft && (workspaceFaceDraft.id !== context.id || workspaceFaceDraft.frame !== context.frame)) workspaceClearFace();
- if (workspaceSlice && workspaceSlice.id !== context.id) {
-  workspaceSlice = null;
-  $('cqt-slice-enable').checked = false;
-  fcRerenderVisible();
-  scheduleDockRender();
  }
  if (workspaceCompareSelection?.id === context.id && workspaceLastCompareFrame !== context.frame &&
      $('cqt-ref-output')?.getClientRects().length) {
