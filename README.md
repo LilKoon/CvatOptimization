@@ -4,13 +4,13 @@ Cuboid Toolbox được tích hợp vào giao diện CVAT Community **v2.76.0** 
 
 Trong **Full Control**, mở **Limit theo class** để chỉnh ngưỡng L/W/H, kiểm tra và gọt theo class. Nút **Công cụ Toolbox** mở các tab Box, Ground, Track, QA và Cài đặt ngay cạnh bảng. Chế độ **Đầy đủ điểm** giữ point cloud của frame đã nạp khi xoay, kéo nền hoặc di chuyển cuboid. Trong **Frame lớn**, lăn chuột để chuyển frame theo bộ lọc. Giữ Alt, Ctrl hoặc Cmd khi lăn để zoom từng góc chiếu. Kéo nền để dịch và bấm nút tâm để căn lại.
 
-Trong **3D lớn**, mỗi frame lấp đầy chiều cao còn lại, với khung 3D ở trên và ba góc Top, Side, Front ngay bên dưới. Khi cuộn, danh sách tự căn vào đầu frame. Giữ `Option`, `Alt` hoặc `Ctrl` khi lăn để zoom góc chiếu. Ô **Object ID** nhận số nguyên từ 1 trở lên.
+Trong **3D lớn**, mỗi frame lấp đầy chiều cao còn lại, với khung 3D ở trên và ba góc Top, Side, Front ngay bên dưới. Danh sách cuộn liên tục bằng touchpad, chuột hoặc thanh cuộn dọc. Giữ `Option`, `Alt` hoặc `Ctrl` khi lăn để zoom góc chiếu. Ô **Object ID** nhận số nguyên từ 1 trở lên.
 
 **Nạp object** dùng ID hiển thị trong danh sách Objects của CVAT. **Bảng track**, **Frame lớn** và **3D lớn** dùng được với Shape và Track. Nếu chưa chọn bố cục, object một frame mở ở **Frame lớn**. Track hiện tổng số frame có cuboid, số keyframe hiện diện và số frame Outside ngay cạnh Object ID.
 
 Khi bật **Tự nạp Cloud** và **Đầy đủ điểm**, **Nạp object** tải trước và giữ tối đa 256 MiB tọa độ point cloud cho track đang mở. Khi track vượt mức đó, **3D lớn** và **Frame lớn** tự nạp lại dữ liệu chi tiết cho frame đang xem. Tiến độ cuối lượt nạp phản ánh số frame đang có đủ điểm. Khung phát chính của CVAT giữ nguyên frame đang mở.
 
-Ba nút bố cục luôn hiện cạnh Object ID. Dùng `1` / `2` / `3` để đổi giữa **Bảng track**, **Frame lớn** và **3D lớn**. Rê chuột hoặc bấm **Thanh công cụ** để mở ba tab **Hiển thị**, **Frame & Track** và **Fit Ground**. Bấm **Ghim** để giữ thanh mở. Dùng `−` / `+` để chỉnh cỡ điểm hoặc kéo thanh trượt trong tab **Hiển thị**. Thông báo mức cỡ điểm tự ẩn.
+Ba nút bố cục luôn hiện cạnh Object ID. Dùng `1` / `2` / `3` để đổi giữa **Bảng track**, **Frame lớn** và **3D lớn**. Rê chuột hoặc bấm **Thanh công cụ** để mở ba tab **Hiển thị**, **Frame & Track** và **Fit Ground**. Bấm **Ghim** để giữ thanh mở. Dùng `⌥−` / `⌥=` (Windows/Linux dùng `Alt+-` / `Alt+=`) để chỉnh cỡ điểm hoặc kéo thanh trượt trong tab **Hiển thị**. Thông báo mức cỡ điểm tự ẩn.
 
 Trên macOS, `⌥C` chốt kích thước và `⌥D` đồng bộ L/W/H cho toàn track. Bấm `⌥G` (Windows/Linux dùng `Alt+G`), chọn **Nguồn** bằng số rồi chọn **Phạm vi**. Ví dụ `⌥G` → `2` → `4` xem trước Fit Ground theo mặt đất toàn cảnh cho toàn object. Bấm `Enter` để áp dụng hoặc `Esc` để hủy.
 
@@ -23,6 +23,8 @@ Chọn **Cách đặt → Nghiêng theo dốc** để căn đáy cuboid theo m�
 **Point Cloud dưới chân** ưu tiên điểm ngay dưới cuboid và sát mép đáy. Bán kính giới hạn phạm vi tìm kiếm. **Mặt đất toàn cảnh** ước lượng một mặt phẳng đất từ cloud của cả frame, dùng được cho frame hiện tại hoặc từng frame trong dải.
 
 Với các nguồn khác, bấm **Đo đáy** để xem sai lệch có dấu hoặc **Áp dụng Fit Ground** để chỉnh cuboid. **Gốc tọa độ LiDAR** dùng mặt phẳng XY của cảm biến từ `VIEWPOINT` trong PCD và dùng `Z = 0` của frame khi header thiếu trường này. **Cloud quanh LiDAR** lấy điểm theo bán kính quanh cảm biến.
+
+**Cài đặt → Phím tắt** cho phép gán lại, xóa hoặc khôi phục từng phím. Fit Ground có mục riêng cho phím mở, nguồn và phạm vi. Góc chiếu Tool và Full Control dùng chung cỡ điểm.
 
 ## Build giao diện Toolbox
 

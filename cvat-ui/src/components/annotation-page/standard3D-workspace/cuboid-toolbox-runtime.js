@@ -226,11 +226,10 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '4.9.4';
+const VERSION = '4.9.5';
 const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
-const LWH_SYNC_SHORTCUT = IS_MAC ? '⌥D' : 'Alt+S';
 const FIT_SIZE_HINT = 'Dùng cho Smart Snap. Bật để đo lại chiều dài, rộng và cao từ cụm điểm. Tắt để giữ kích thước hiện tại.';
 const KEY_PREFIX = IS_MAC ? '⌥⇧Q → ' : 'Alt+Shift+Q → ';
 
@@ -265,6 +264,7 @@ const ICONS = {
  panelRight: svgIcon('<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>'),
  rows2: svgIcon('<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 12h18"/>'),
  crosshair: svgIcon('<circle cx="12" cy="12" r="10"/><line x1="22" x2="18" y1="12" y2="12"/><line x1="6" x2="2" y1="12" y2="12"/><line x1="12" x2="12" y1="6" y2="2"/><line x1="12" x2="12" y1="22" y2="18"/>'),
+ chart: svgIcon('<path d="M3 3v18h18M8 16v-4m5 4V8m5 8V5"/>'),
  arrowDownLine: svgIcon('<path d="M12 17V3"/><path d="m6 11 6 6 6-6"/><path d="M19 21H5"/>'),
  anchor: svgIcon('<circle cx="12" cy="5" r="3"/><line x1="12" x2="12" y1="22" y2="8"/><path d="M5 12H2a10 10 0 0 0 20 0h-3"/>'),
  move: svgIcon('<polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" x2="22" y1="12" y2="12"/><line x1="12" x2="12" y1="2" y2="22"/>'),
@@ -284,6 +284,7 @@ const LS = {
  legacyHealthPos: 'cqt_health_pos_v1',
  itemPos: 'cqt_item_viewport_pos_v1',
  toolboxPos: 'cqt_toolbox_viewport_pos_v1',
+ shortcuts: 'cqt_shortcuts_v1',
 };
 
 // Ngưỡng LWH tiêu chuẩn theo class (m)
@@ -1438,11 +1439,11 @@ function refreshSnapshotList() {
  const list = snapshots.map((s, i) => ({ s, i })).filter(({ s }) => s.jobId === jobId);
  const redoList = redoStack.filter((s) => s.jobId === jobId);
  const undoTitle = list.length
-  ? `Hoàn tác: "${list[0].s.label}" (${list[0].s.items.length} mục) — Phím ${OPTION_KEY}Z`
-  : `Chưa có thao tác để hoàn tác (${OPTION_KEY}Z)`;
+  ? `Hoàn tác: "${list[0].s.label}" (${list[0].s.items.length} mục) — Phím ${shortcutLabel('direct', 'undo')}`
+  : `Chưa có thao tác để hoàn tác (${shortcutLabel('direct', 'undo')})`;
  const redoTitle = redoList.length
-  ? `Làm lại: "${redoList[0].label}" (${redoList[0].items.length} mục) — Phím ${OPTION_KEY}${IS_MAC ? '⇧Z' : 'Shift+Z'}`
-  : `Chưa có thao tác để làm lại (${OPTION_KEY}${IS_MAC ? '⇧Z' : 'Shift+Z'})`;
+  ? `Làm lại: "${redoList[0].label}" (${redoList[0].items.length} mục) — Phím ${shortcutLabel('direct', 'redo')}`
+  : `Chưa có thao tác để làm lại (${shortcutLabel('direct', 'redo')})`;
  if (quickUndoBtn) {
   quickUndoBtn.disabled = !list.length;
   quickUndoBtn.title = undoTitle;
@@ -1857,7 +1858,7 @@ function renderAnchorChips() {
  if (!box) return;
  const ids = getExplicitAnchorIds();
  if (!ids.length) {
-  box.innerHTML = `<span class="cqt-hint">Chưa ghim Anchor — trỏ chuột vào xe chuẩn trên màn 3D bấm <span class="cqt-kbd">${OPTION_KEY}B</span> để chọn nhanh.</span>`;
+  box.innerHTML = `<span class="cqt-hint">Chưa ghim Anchor — trỏ chuột vào xe chuẩn trên màn 3D bấm ${shortcutHint('anchor')} để chọn nhanh.</span>`;
   return;
  }
  box.innerHTML = ids
@@ -3306,7 +3307,8 @@ async function fetchLWH(id, frame = getFrame()) {
  const lim = getLimitsForLabel(label);
  const out = lim ? limitViolations(l, w, h, lim) : [];
  setStatus(
-  `✅ Đã chốt LWH #${id} [${label}] @f${frame}: ${fmtLWH(l, w, h)} — bấm ${LWH_SYNC_SHORTCUT} để đồng bộ track` +
+  `✅ Đã chốt LWH #${id} [${label}] @f${frame}: ${fmtLWH(l, w, h)}` +
+  (shortcutKeys('direct', 'lwh-sync').length ? ` — bấm ${shortcutLabel('direct', 'lwh-sync')} để đồng bộ track` : '') +
   (out.length ? ` ⚠️ Ngoài limits: ${out.join('; ')}.` : (lim ? ' (trong limits).' : '.')),
   out.length ? 'warn' : 'success'
  );
@@ -7373,9 +7375,9 @@ function handleTransformKey(e) {
   else if (xf.axis !== axis) { xf.axis = axis; xf.local = false; }
   else if (!xf.local && axis !== 'Z') xf.local = true;
   else { xf.axis = null; xf.local = false; }
- } else if (TRANSFORM_KEYS[e.code]) {
+ } else if (transformModeForKey(e)) {
   restoreMeshes();
-  Object.assign(xf, { mode: TRANSFORM_KEYS[e.code], axis: null, local: false, typed: '', startMouse: { ...lastMouse } });
+  Object.assign(xf, { mode: transformModeForKey(e), axis: null, local: false, typed: '', startMouse: { ...lastMouse } });
  } else if (/^[0-9]$/.test(k) || k === '.' || k === ',') {
   xf.typed += k === ',' ? '.' : k;
  } else if (k === '-') {
@@ -7454,17 +7456,13 @@ function isTyping(e) {
 }
 
 const KEY_CODE_LABELS = {
- Backslash: '\\', Comma: '<', Period: '>', Backquote: '`',
- Numpad7: 'Num7', Numpad1: 'Num1', Numpad3: 'Num3', NumpadDecimal: 'Num.',
+ Backslash: '\\', Comma: ',', Period: '.', Backquote: '`', Minus: '−', Equal: '=',
 };
-function markShortcut(e, prefix = KEY_PREFIX) {
- const base = KEY_CODE_LABELS[e.code] || e.code.replace(/^(Key|Digit)/, '');
- activeKeyBadge = `${prefix}${e.shiftKey ? 'Shift+' : ''}${base}`;
+function markShortcut(text) {
+ activeKeyBadge = text;
  activeKeyTime = Date.now();
 }
 
-const TRANSFORM_KEYS = { KeyG: 'G', KeyW: 'R', KeyS: 'S' };
-const NUMPAD_VIEWS = { Numpad7: 'top', Numpad1: 'front', Numpad3: 'side', NumpadDecimal: 'focus' };
 function lwhShortcutTarget() {
  if (!fc.open || fc.toolsOpen || !Number.isInteger(fc.targetId)) return null;
  const row = fcRowAtPoint(lastMouse.x, lastMouse.y);
@@ -7472,62 +7470,132 @@ function lwhShortcutTarget() {
  return { id: fc.targetId, frame };
 }
 
-const SHORTCUT_ACTIONS = {
- KeyQ: (e) => (e.shiftKey ? toggleStealthUI() : (fc.open ? fcToggleTools() : togglePanel())),
- Backslash: () => toggleStealthUI(),
- KeyM: () => toggleFullControl(),
- KeyV: () => toggleDockViews(),
- KeyU: () => openQCWorkspace(),
- KeyN: () => toggleItemPanel(),
- KeyA: () => autoDetectAndSpan(),
- KeyB: (e) => (e.shiftKey ? clearAllAnchors() : toggleAnchorUnderPointer()),
- KeyP: (e) => smartSnap(selectedOrTarget(), e.shiftKey ? true : undefined),
- KeyH: (e) => runGroundFitShortcut('cloud', e.shiftKey ? 'selected' : 'current'),
- KeyL: (e) => runGroundFitShortcut('lidar', e.shiftKey ? 'selected' : 'current'),
- KeyE: () => runGroundFitShortcut('anchor', 'selected'),
- KeyC: () => {
+const layoutShortcutAvailable = () => fc.open && !fc.toolsOpen;
+const pointSizeShortcutAvailable = () => fc.open || dockOn();
+const TOOL_SHORTCUTS = [
+ ['toolbox', 'Mở/thu Toolbox', 'Alt+KeyQ', 'KeyQ', () => fc.open ? fcToggleTools() : togglePanel()],
+ ['prefix', 'Mở chuỗi lệnh Toolbox', 'Alt+Shift+KeyQ', '', () => {
+  shortcutUntil = Date.now() + 2400;
+  showToast('Chọn lệnh Toolbox · Esc để huỷ', 'info', shortcutLabel('direct', 'prefix'));
+ }],
+ ['full', 'Mở/đóng Full Control', 'Alt+KeyT', 'KeyM', toggleFullControl],
+ ['projection', 'Đổi góc chiếu Tool / CVAT', 'Alt+KeyV', 'KeyV', toggleDockViews],
+ ['qc', 'Mở QA/QC', 'Alt+KeyW', 'KeyU', openQCWorkspace],
+ ['item', 'Mở/thu bảng Item', 'Alt+KeyN', 'KeyN', toggleItemPanel],
+ ['pick', 'Lấy object và dò dải', 'Alt+KeyA', 'KeyA', autoDetectAndSpan],
+ ['anchor', 'Thêm/bỏ Anchor đang trỏ', 'Alt+KeyB', 'KeyB', toggleAnchorUnderPointer],
+ ['anchors-clear', 'Bỏ toàn bộ Anchor', 'Alt+Shift+KeyB', 'Shift+KeyB', clearAllAnchors],
+ ['snap', 'Smart Snap', 'Alt+KeyP', 'KeyP', () => smartSnap(selectedOrTarget())],
+ ['snap-size', 'Smart Snap và đo L/W/H', 'Alt+Shift+KeyP', 'Shift+KeyP', () => smartSnap(selectedOrTarget(), true)],
+ ['ground', 'Mở Fit Ground', 'Alt+KeyG', '', openGroundShortcut],
+ ['foot', 'Xem Fit Ground dưới chân · frame', 'Alt+KeyH', 'KeyH', () => runGroundFitShortcut('cloud', 'current')],
+ ['foot-range', 'Xem Fit Ground dưới chân · dải', 'Alt+Shift+KeyH', 'Shift+KeyH', () => runGroundFitShortcut('cloud', 'selected')],
+ ['lidar', 'Fit Cloud quanh LiDAR · frame', '', 'KeyL', () => runGroundFitShortcut('lidar', 'current')],
+ ['lidar-range', 'Fit Cloud quanh LiDAR · dải', 'Alt+Shift+KeyG', 'Shift+KeyL', () => runGroundFitShortcut('lidar', 'selected')],
+ ['anchor-range', 'Fit theo Anchor · dải', 'Alt+KeyY', 'KeyE', () => runGroundFitShortcut('anchor', 'selected')],
+ ['lwh-pin', 'Chốt L/W/H', 'Alt+KeyC', 'KeyC', () => {
   const target = lwhShortcutTarget();
   return target ? fetchLWH(target.id, target.frame) : fetchLWH();
- },
- KeyD: (e) => e.shiftKey ? applyLWH('range') : applyLWH('track', lwhShortcutTarget() ?? undefined),
- KeyR: (e) => (e.shiftKey ? alignYawCurrentFrame() : rotateTrack(180)),
- KeyI: (e) => (e.shiftKey ? reinterpolateRange() : smoothTrack()),
- Comma: () => stepObjectKeyframe('prev'),
- Period: () => stepObjectKeyframe('next'),
- KeyK: (e) => setKeyframe(e.shiftKey ? 'frame' : undefined),
- KeyX: (e) => (e.shiftKey ? outsideSelected() : cutTrackToEnd()),
- KeyZ: (e) => (e.shiftKey ? redoLatestSnapshot() : restoreLatestSnapshot()),
- KeyY: () => redoLatestSnapshot(),
- KeyF: () => cameraView('focus'),
- Backquote: () => cameraView('focus'),
- Digit1: (e) => cameraView('front', e.shiftKey),
- Digit2: (e) => cameraView('top', e.shiftKey),
- Digit3: (e) => cameraView('side', e.shiftKey),
- Digit7: (e) => cameraView('top', e.shiftKey),
-};
+ }],
+ ['lwh-sync', 'Đồng bộ L/W/H toàn track', IS_MAC ? ['Alt+KeyD', 'Alt+KeyS'] : 'Alt+KeyS', 'KeyD',
+  () => applyLWH('track', lwhShortcutTarget() ?? undefined)],
+ ['lwh-range', 'Đồng bộ L/W/H dải Start–End', 'Alt+Shift+KeyS', 'Shift+KeyD', () => applyLWH('range')],
+ ['flip', 'Lật cuboid 180°', 'Alt+KeyR', 'KeyR', () => rotateTrack(180)],
+ ['heading', 'Nắn hướng tại frame hiện tại', 'Alt+Shift+KeyR', 'Shift+KeyR', alignYawCurrentFrame],
+ ['smooth', 'Làm mượt track', '', 'KeyI', smoothTrack],
+ ['interpolate', 'Nội suy lại dải', '', 'Shift+KeyI', reinterpolateRange],
+ ['key-prev', 'Keyframe trước', '', 'Comma', () => stepObjectKeyframe('prev')],
+ ['key-next', 'Keyframe sau', '', 'Period', () => stepObjectKeyframe('next')],
+ ['key-add', 'Đặt keyframe theo phạm vi', '', 'KeyK', () => setKeyframe()],
+ ['key-frame', 'Đặt keyframe tại frame hiện tại', '', 'Shift+KeyK', () => setKeyframe('frame')],
+ ['outside', 'Outside tới hết track', 'Alt+KeyX', 'KeyX', cutTrackToEnd],
+ ['outside-frame', 'Outside frame hiện tại', 'Alt+Shift+KeyX', 'Shift+KeyX', () => outsideSelected()],
+ ['undo', 'Hoàn tác Toolbox', 'Alt+KeyZ', 'KeyZ', () => restoreLatestSnapshot()],
+ ['redo', 'Làm lại Toolbox', 'Alt+Shift+KeyZ', ['Shift+KeyZ', 'KeyY'], redoLatestSnapshot],
+ ['stealth', 'Ẩn/hiện giao diện Toolbox', '', ['Shift+KeyQ', 'Backslash'], toggleStealthUI],
+ ['focus', 'Focus camera', '', ['KeyF', 'Backquote', 'NumpadDecimal'], () => cameraView('focus')],
+ ['front', 'Camera Front', '', ['Digit1', 'Numpad1'], () => cameraView('front')],
+ ['back', 'Camera Rear', '', ['Shift+Digit1', 'Shift+Numpad1'], () => cameraView('front', true)],
+ ['top', 'Camera Top', '', ['Digit2', 'Digit7', 'Numpad7'], () => cameraView('top')],
+ ['bottom', 'Camera Bottom', '', ['Shift+Digit2', 'Shift+Digit7', 'Shift+Numpad7'], () => cameraView('top', true)],
+ ['side', 'Camera Side', '', ['Digit3', 'Numpad3'], () => cameraView('side')],
+ ['opposite-side', 'Camera Side đối diện', '', ['Shift+Digit3', 'Shift+Numpad3'], () => cameraView('side', true)],
+ ['layout-table', 'Full Control · Bảng track', 'Digit1', '', () => fcSetLayout('table'), layoutShortcutAvailable],
+ ['layout-focus', 'Full Control · Frame lớn', 'Digit2', '', () => fcSetLayout('focus'), layoutShortcutAvailable],
+ ['layout-stacked', 'Full Control · 3D lớn', 'Digit3', '', () => fcSetLayout('stacked'), layoutShortcutAvailable],
+ ['points-down', 'Giảm cỡ điểm', 'Alt+Minus', '', () => fcSetPointSize(fc.cfg.pointSize - 1, true), pointSizeShortcutAvailable],
+ ['points-up', 'Tăng cỡ điểm', 'Alt+Equal', '', () => fcSetPointSize(fc.cfg.pointSize + 1, true), pointSizeShortcutAvailable],
+ ...[['move', 'Di chuyển cuboid', 'KeyG', 'G'], ['rotate', 'Xoay cuboid', 'KeyW', 'R'], ['scale', 'Co giãn cuboid', 'KeyS', 'S']]
+  .map(([id, label, key, mode]) => [id, label, key, key, () => startTransform(mode), canStartShortcutTransform, mode]),
+];
 
-// The physical key code also works when Option produces a symbol on macOS.
-const DIRECT_OPTION_ACTIONS = {
- KeyQ: SHORTCUT_ACTIONS.KeyQ,
- KeyT: SHORTCUT_ACTIONS.KeyM,
- KeyV: SHORTCUT_ACTIONS.KeyV,
- KeyW: SHORTCUT_ACTIONS.KeyU,
- KeyN: SHORTCUT_ACTIONS.KeyN,
- KeyA: SHORTCUT_ACTIONS.KeyA,
- KeyB: SHORTCUT_ACTIONS.KeyB,
- KeyP: SHORTCUT_ACTIONS.KeyP,
- KeyH: SHORTCUT_ACTIONS.KeyH,
- KeyG: (e) => e.shiftKey ? SHORTCUT_ACTIONS.KeyL(e) : openGroundShortcut(),
- KeyC: SHORTCUT_ACTIONS.KeyC,
- // Chrome on Windows/Linux uses Alt+D to focus the address bar.
- KeyD: IS_MAC ? SHORTCUT_ACTIONS.KeyD : null,
- KeyS: SHORTCUT_ACTIONS.KeyD,
- KeyR: SHORTCUT_ACTIONS.KeyR,
- KeyX: SHORTCUT_ACTIONS.KeyX,
- KeyZ: SHORTCUT_ACTIONS.KeyZ,
- KeyY: SHORTCUT_ACTIONS.KeyE,
+const SHORTCUT_GROUPS = {
+ direct: 'Phím trực tiếp',
+ sequence: 'Sau phím mở chuỗi lệnh Toolbox',
+ source: 'Fit Ground · Chọn nguồn',
+ range: 'Fit Ground · Chọn phạm vi',
 };
-const DIRECT_OPTION_SHIFT = new Set(['KeyB', 'KeyP', 'KeyH', 'KeyG', 'KeyS', 'KeyR', 'KeyX', 'KeyZ']);
+const SHORTCUT_ROWS = {
+ direct: TOOL_SHORTCUTS.map(([id, label, direct]) => [id, label, direct]),
+ sequence: TOOL_SHORTCUTS.filter(([id]) => id !== 'prefix').map(([id, label, , sequence]) => [id, label, sequence]),
+ source: Object.entries(GROUND_FIT_CHOICES).map(([id, label], i) => [id, label, [`Digit${i + 1}`, `Numpad${i + 1}`]]),
+ range: Object.entries(groundScopeChoices(false)).map(([id, label], i) => [id, label, [`Digit${i + 1}`, `Numpad${i + 1}`]]),
+};
+const shortcutOverrides = loadOpts(LS.shortcuts, {});
+let shortcutCapture = null;
+
+function shortcutKeys(group, id) {
+ const binding = shortcutOverrides[`${group}:${id}`];
+ if (typeof binding === 'string') return binding ? [binding] : [];
+ const defaults = SHORTCUT_ROWS[group].find(([key]) => key === id)?.[2];
+ return Array.isArray(defaults) ? defaults : defaults ? [defaults] : [];
+}
+
+function eventShortcut(e) {
+ if (!e.code || e.code === 'Unidentified' || e.getModifierState('AltGraph') ||
+     ['Alt', 'Shift', 'Meta', 'Control', 'AltGraph'].includes(e.key)) return '';
+ return [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Meta', e.code].filter(Boolean).join('+');
+}
+
+function shortcutText(key) {
+ return key.split('+').map((part) => {
+  const modifiers = IS_MAC ? { Alt: '⌥', Ctrl: '⌃', Shift: '⇧', Meta: '⌘' } : { Meta: 'Win' };
+  return modifiers[part] || KEY_CODE_LABELS[part] || part.replace(/^(Key|Digit)/, '').replace(/^Numpad/, 'Num ');
+ }).join(IS_MAC ? '' : '+');
+}
+
+function shortcutLabel(group, id) {
+ return shortcutKeys(group, id).map(shortcutText).join(' / ') || 'Chưa gán';
+}
+
+function syncShortcutHints() {
+ for (const badge of root.querySelectorAll('[data-shortcut-hint]')) {
+  const id = badge.dataset.shortcutHint;
+  const keys = shortcutKeys('direct', id);
+  badge.textContent = keys.slice(0, 1).map(shortcutText).join('');
+  badge.hidden = !keys.length;
+ }
+ for (const el of root.querySelectorAll('[data-shortcut-title]')) {
+  const keys = shortcutKeys('direct', el.dataset.shortcutTitle);
+  el.title = el.dataset.shortcutTitleText + (keys.length ? ` (${keys.map(shortcutText).join(' / ')})` : '');
+ }
+}
+
+function shortcutHint(id) {
+ const label = shortcutKeys('direct', id).slice(0, 1).map(shortcutText).join('');
+ return `<span class="cqt-kbd" data-shortcut-hint="${id}"${label ? '' : ' hidden'}>${escapeHtml(label)}</span>`;
+}
+
+function canStartShortcutTransform() {
+ const mode = annotationState()?.canvas?.instance?.mode?.();
+ return getSettings().blenderKeys && (!mode || mode === 'idle') &&
+  pointerOverCanvas(lastMouse.x, lastMouse.y) && transformTargets().length;
+}
+
+function transformModeForKey(e) {
+ const key = eventShortcut(e);
+ return TOOL_SHORTCUTS.find(([id, , , , , , mode]) => mode && shortcutKeys('direct', id).includes(key))?.[6];
+}
 function runGroundFitShortcut(kind, range) {
  return selectGroundShortcutOptions(kind, range, fc.open && !fc.toolsOpen);
 }
@@ -7555,9 +7623,10 @@ function renderGroundShortcut() {
  const choices = kind ? (shape ? { current: 'Frame hiện tại' } : groundScopeChoices(fullControl)) : GROUND_FIT_CHOICES;
  menu.innerHTML = `<div id="cqt-ground-shortcut-title" class="cqt-h">${kind
   ? `Fit Ground · ${GROUND_FIT_CHOICES[kind]} · Chọn phạm vi` : 'Fit Ground · Chọn nguồn'}</div>
-  <div class="cqt-ground-shortcut-options">${Object.entries(choices).map(([value, label], index) =>
+  <div class="cqt-ground-shortcut-options">${Object.entries(choices).map(([value, label]) =>
    `<button type="button" class="cqt-btn cqt-btn-secondary" data-ground-shortcut-choice="${value}">
-    <kbd class="cqt-kbd">${index + 1}</kbd><span>${label}</span></button>`).join('')}</div>
+    <kbd class="cqt-kbd">${escapeHtml(shortcutKeys(kind ? 'range' : 'source', value).slice(0, 1).map(shortcutText).join('') || '—')}</kbd>
+    <span>${label}</span></button>`).join('')}</div>
   <div class="cqt-hint">${kind ? 'Backspace về nguồn · ' : ''}Esc để hủy</div>`;
  menu.hidden = false;
  menu.querySelector('button').focus({ preventScroll: true });
@@ -7610,15 +7679,13 @@ async function chooseGroundShortcut(choice) {
 
 function handleGroundShortcutKey(e) {
  if (!groundShortcut) return false;
- if (e.ctrlKey || e.metaKey || e.altKey) {
-  if (!['Control', 'Meta', 'Alt', 'Shift'].includes(e.key)) closeGroundShortcut();
-  return false;
- }
- const digit = /^(?:Digit|Numpad)([1-5])$/.exec(e.code);
- if (digit && !e.shiftKey) {
+ const key = eventShortcut(e);
+ const group = groundShortcut.kind ? 'range' : 'source';
+ const button = [...$('cqt-ground-shortcut').querySelectorAll('[data-ground-shortcut-choice]')]
+  .find((option) => shortcutKeys(group, option.dataset.groundShortcutChoice).includes(key));
+ if (button) {
   swallow(e);
-  const button = $('cqt-ground-shortcut').querySelectorAll('button')[Number(digit[1]) - 1];
-  if (!e.repeat && button) void guarded(chooseGroundShortcut)(button.dataset.groundShortcutChoice);
+  if (!e.repeat) void guarded(chooseGroundShortcut)(button.dataset.groundShortcutChoice);
   return true;
  }
  if (e.key === 'Escape') {
@@ -7634,24 +7701,152 @@ function handleGroundShortcutKey(e) {
   }
   return true;
  }
+ if (key && !e.ctrlKey && !e.metaKey && !e.altKey && /^\w$/.test(e.key)) {
+  swallow(e);
+  return true;
+ }
+ if (key && (e.ctrlKey || e.metaKey || e.altKey)) closeGroundShortcut();
  return false;
 }
 
 let shortcutUntil = 0;
-function hasNativePrefix(shortcut = 'alt+q+shift') {
- return Object.values(store.getState().shortcuts?.keyMap ?? {}).some(({ sequences = [] }) =>
-  sequences.some((sequence) => typeof sequence === 'string' &&
-   sequence.toLowerCase().trim().split(/\s+/)[0].split('+')
-    .map((part) => part === 'option' ? 'alt' : part).sort().join('+') === shortcut));
+function nativeShortcutConflict(key) {
+ const normalize = (part) => ({
+  option: 'alt', control: 'ctrl', command: 'meta', cmd: 'meta',
+  minus: '-', equal: '=', comma: ',', period: '.', backquote: '`', backslash: '\\',
+ }[part] || part.replace(/^(key|digit)/, ''));
+ const canonical = (chord) => chord.toLowerCase().split('+').map(normalize).sort().join('+');
+ return Object.values(store.getState().shortcuts?.keyMap ?? {}).find(({ sequences = [], nonActive }) =>
+  !nonActive && sequences.some((sequence) => typeof sequence === 'string' &&
+   canonical(sequence.trim().split(/\s+/)[0]) === canonical(key)));
+}
+
+function renderShortcutSettings() {
+ for (const row of $('cqt-shortcut-editor').querySelectorAll('[data-shortcut-row]')) {
+  const [group, id] = row.dataset.shortcutRow.split(':');
+  const button = row.querySelector('[data-shortcut-edit]');
+  button.textContent = shortcutCapture === row.dataset.shortcutRow ? 'Bấm phím…' : shortcutLabel(group, id);
+  button.setAttribute('aria-pressed', String(shortcutCapture === row.dataset.shortcutRow));
+  row.querySelector('[data-shortcut-clear]').disabled = !shortcutKeys(group, id).length;
+  row.querySelector('[data-shortcut-reset]').disabled = !Object.hasOwn(shortcutOverrides, row.dataset.shortcutRow);
+ }
+ syncShortcutHints();
+}
+
+function saveShortcut(id, key, message) {
+ if (key === undefined) delete shortcutOverrides[id];
+ else shortcutOverrides[id] = key;
+ lsSet(LS.shortcuts, shortcutOverrides);
+ shortcutCapture = null;
+ renderShortcutSettings();
+ refreshSnapshotList();
+ $('cqt-shortcut-status').textContent = message;
+}
+
+function handleShortcutCapture(e) {
+ if (!shortcutCapture) return false;
+ swallow(e);
+ if (e.repeat) return true;
+ if (e.key === 'Escape') {
+  shortcutCapture = null;
+  renderShortcutSettings();
+  $('cqt-shortcut-status').textContent = 'Đã hủy gán phím.';
+  return true;
+ }
+ const key = eventShortcut(e);
+ if (!key) return true;
+ const [group, id] = shortcutCapture.split(':');
+ const action = SHORTCUT_ROWS[group].find(([other]) => other === id);
+ const duplicate = SHORTCUT_ROWS[group].find(([other]) => other !== id && shortcutKeys(group, other).includes(key));
+ const native = group === 'direct' && nativeShortcutConflict(key);
+ const contextOnly = /^(layout-|move$|rotate$|scale$)/.test(id);
+ if (['Tab', 'Enter', 'Backspace', 'Space'].includes(key)) {
+  $('cqt-shortcut-status').textContent = 'Chọn phím khác. Phím này dùng để điều hướng hoặc xác nhận.';
+ } else if (duplicate) {
+  $('cqt-shortcut-status').textContent = `${shortcutText(key)} đang gán cho “${duplicate[1]}”. Xóa phím ở mục đó hoặc chọn phím khác.`;
+ } else if (native && !contextOnly) {
+  $('cqt-shortcut-status').textContent = `${shortcutText(key)} đang được CVAT dùng. Chọn phím khác hoặc gán sau chuỗi lệnh Toolbox.`;
+ } else {
+  saveShortcut(shortcutCapture, key, `Đã gán ${shortcutText(key)} cho “${action[1]}”.`);
+ }
+ return true;
+}
+
+function bindShortcutSettings() {
+ const editor = $('cqt-shortcut-editor');
+ editor.addEventListener('click', (e) => {
+  const button = e.target.closest('button');
+  const row = button?.closest('[data-shortcut-row]');
+  if (!row) return;
+  const id = row.dataset.shortcutRow;
+  if (button.hasAttribute('data-shortcut-edit')) {
+   shortcutCapture = id;
+   shortcutUntil = 0;
+   $('cqt-shortcut-status').textContent = 'Bấm phím hoặc tổ hợp muốn gán. Esc để hủy.';
+   renderShortcutSettings();
+  } else if (button.hasAttribute('data-shortcut-clear')) {
+   saveShortcut(id, '', 'Đã xóa phím tắt.');
+  } else if (button.hasAttribute('data-shortcut-reset')) {
+   saveShortcut(id, undefined, 'Đã khôi phục phím mặc định.');
+  }
+ });
+ editor.addEventListener('focusout', () => {
+  if (!shortcutCapture) return;
+  shortcutCapture = null;
+  renderShortcutSettings();
+  $('cqt-shortcut-status').textContent = 'Đã hủy gán phím.';
+ });
+ renderShortcutSettings();
+}
+
+function runToolShortcut(e) {
+ const key = eventShortcut(e);
+ if (!key) return;
+ const armed = Date.now() <= shortcutUntil;
+ shortcutUntil = 0;
+ const matches = (group) => TOOL_SHORTCUTS.find(([id, , , , , available]) =>
+  shortcutKeys(group, id).includes(key) && (!available || available()));
+ const sequence = armed && matches('sequence');
+ const direct = sequence ? null : matches('direct');
+ const action = sequence || direct;
+ if (!action) return;
+ const [id, , , , run, , transform] = action;
+ // Canvas transforms and Full Control controls take precedence only in their own context.
+ if (direct && !transform && !id.startsWith('layout-') && nativeShortcutConflict(key)) return;
+ swallow(e);
+ if (e.repeat) return;
+ const label = shortcutText(key);
+ markShortcut(sequence ? `${shortcutLabel('direct', 'prefix')} → ${label}` : label);
+ void guarded(run)();
+}
+
+function shortcutSettingsHTML() {
+ return `<details id="cqt-shortcut-editor" class="cqt-card cqt-disclosure">
+  <summary>Phím tắt</summary>
+  <p class="cqt-hint">Bấm vào phím để đổi. Phím mở Fit Ground, nguồn và phạm vi được gán riêng. Thiết lập lưu trên trình duyệt này.</p>
+  <p id="cqt-shortcut-status" class="cqt-hint" role="status"></p>
+  ${Object.entries(SHORTCUT_GROUPS).map(([group, label]) => `<details class="cqt-disclosure">
+   <summary>${label}</summary>
+   <div class="cqt-shortcut-rows">
+   ${SHORTCUT_ROWS[group].map(([id, name]) => `<div class="cqt-shortcut-row" data-shortcut-row="${group}:${id}">
+     <span>${name}</span>
+     <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-shortcut-edit aria-label="Gán phím cho ${name}"></button>
+     <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-shortcut-clear aria-label="Xóa phím của ${name}">Xóa</button>
+     <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-shortcut-reset aria-label="Khôi phục phím mặc định cho ${name}">Mặc định</button>
+    </div>`).join('')}
+   </div>
+  </details>`).join('')}
+ </details>`;
 }
 
 function onKeyDown(e) {
  if (!getJob() || e.defaultPrevented || e.isComposing || !$('cvat-quicktool-wrapper')) return;
+ if (handleShortcutCapture(e)) return;
  if (xf.active) {
   // Browser and OS shortcuts remain available even during a drag.
   if (!e.metaKey && !e.ctrlKey && !e.altKey &&
       (/^[0-9.,-]$/.test(e.key) || ['Escape', 'Enter', 'Backspace'].includes(e.key) ||
-       ['KeyX', 'KeyY', 'KeyZ'].includes(e.code) || TRANSFORM_KEYS[e.code])) {
+       ['KeyX', 'KeyY', 'KeyZ'].includes(e.code) || transformModeForKey(e))) {
    return handleTransformKey(e);
   }
   return;
@@ -7705,64 +7900,7 @@ function onKeyDown(e) {
  }
  if (isTyping(e)) { shortcutUntil = 0; return; }
 
- const optionOnly = e.altKey && !e.ctrlKey && !e.metaKey && !e.getModifierState('AltGraph');
- if (optionOnly && e.code === 'KeyQ' && e.shiftKey && !hasNativePrefix()) {
-  swallow(e);
-  if (!e.repeat) {
-   shortcutUntil = Date.now() + 2400;
-   showToast('Chọn lệnh Toolbox · Esc để huỷ', 'info', KEY_PREFIX.trim());
-  }
-  return;
- }
- const armed = Date.now() <= shortcutUntil;
- if (optionOnly && !(armed && TRANSFORM_KEYS[e.code] && e.code !== 'KeyG')) {
-  const action = !e.shiftKey || DIRECT_OPTION_SHIFT.has(e.code) ? DIRECT_OPTION_ACTIONS[e.code] : null;
-  const nativeKey = ['alt', e.code.slice(3).toLowerCase(), ...(e.shiftKey ? ['shift'] : [])].sort().join('+');
-  shortcutUntil = 0;
-  if (!action || hasNativePrefix(nativeKey)) return;
-  swallow(e);
-  if (!e.repeat) {
-   markShortcut(e, OPTION_KEY);
-   void guarded(action)(e);
-  }
-  return;
- }
- if (['Alt', 'Shift', 'Meta', 'Control'].includes(e.key)) return;
- shortcutUntil = 0;
- if (e.repeat || e.ctrlKey || e.metaKey) return;
-
- if (!armed && fc.open && !fc.toolsOpen && !fc.drag && !groundShortcut && !e.altKey &&
-     !$('cqt-modal') && !$('cqt-qc-workspace')) {
-  const layout = !e.shiftKey && FC_LAYOUT_KEYS[e.code];
-  if (layout) {
-   swallow(e);
-   fcSetLayout(layout);
-   return;
-  }
-  if (e.key === '+' || e.key === '-') {
-   swallow(e);
-   fcSetPointSize(fc.cfg.pointSize + (e.key === '+' ? 1 : -1), true);
-   return;
-  }
- }
- const transform = TRANSFORM_KEYS[e.code];
- const direct = !e.altKey && !e.shiftKey;
- const mode = annotationState()?.canvas?.instance?.mode?.();
- if (transform && (armed || direct) && getSettings().blenderKeys && (!mode || mode === 'idle') &&
-     pointerOverCanvas(lastMouse.x, lastMouse.y) && transformTargets().length) {
-  swallow(e);
-  if (armed) markShortcut(e);
-  void guarded(() => startTransform(transform))();
-  return;
- }
- if (!armed || e.altKey) return;
- const action = SHORTCUT_ACTIONS[e.code];
- const camera = NUMPAD_VIEWS[e.code];
- if (!action && !camera) return;
- swallow(e);
- markShortcut(e);
- if (action) void guarded(action)(e);
- else void guarded(() => cameraView(camera, e.shiftKey))();
+ if (!fc.drag && !groundShortcut && !$('cqt-modal') && !$('cqt-qc-workspace')) runToolShortcut(e);
 }
 
 function installGlobalHandlers() {
@@ -7851,7 +7989,6 @@ const FC_MIN_H = 420;
 const FC_HIT_PX = 8;
 const FC_YAW_HANDLE_PX = 14;
 const FC_VIEWS = ['top', 'side', 'front', '3d'];
-const FC_LAYOUT_KEYS = { Digit1: 'table', Digit2: 'focus', Digit3: 'stacked' };
 const FC_MAX_POINT_SIZE = 6;
 const FC_DEFAULTS = {
  maximized: true, x: 60, y: 50, w: 1280, h: 760,
@@ -10004,11 +10141,16 @@ function fcUpdateBars() {
  };
  const isShape = fc.objectType === 'shape';
  const summary = $('cqt-fc-object-summary');
+ const summaryText = summary.querySelector('span');
  const present = h.visRows.length;
  const outside = fc.allRows.length - present;
- summary.textContent = !fc.allRows.length ? '' : isShape
+ summaryText.textContent = !fc.allRows.length ? '' : isShape
   ? `Shape · ${present} frame · F${fc.allRows[0].frame}${outside ? ' · Outside' : ''}`
   : `Track · ${present} frame hiện diện · ${h.visRows.filter((r) => r.key).length} keyframe${outside ? ` · ${outside} Outside` : ''}`;
+ summary.title = summaryText.textContent;
+ const summaryCompact = summary.querySelector('b');
+ summaryCompact.textContent = fc.allRows.length ? `${isShape ? 'Shape' : 'Track'} · ${present}F` : '';
+ summaryCompact.setAttribute('aria-label', summaryText.textContent);
  summary.hidden = !fc.allRows.length;
  fc.el.classList.toggle('shape-object', isShape);
  fc.el.querySelectorAll('[data-count]').forEach((s) => { s.textContent = String(counts[s.dataset.count] ?? 0); });
@@ -10727,27 +10869,27 @@ const FC_HTML = `
   <div class="cqt-fc-head-tools">
    <span class="cqt-label">Object</span>
    <input type="number" id="cqt-fc-target" class="cqt-input" placeholder="ID" min="1" step="1" inputmode="numeric" data-object-id aria-label="Object ID" title="ID hiển thị trong danh sách Objects của CVAT" />
-   <span id="cqt-fc-object-summary" class="cqt-label" aria-live="polite" hidden></span>
+   <span id="cqt-fc-object-summary" class="cqt-label" aria-live="polite" hidden><span></span><b></b></span>
    <div class="cqt-fc-seg" role="group" aria-label="Bố cục Full Control">
-    <button type="button" data-fc-layout="table" aria-pressed="true" title="Bảng track (1)">Bảng track</button>
-    <button type="button" data-fc-layout="focus" aria-pressed="false" title="Frame lớn (2) · Cuộn để chuyển frame">Frame lớn</button>
-    <button type="button" data-fc-layout="stacked" aria-pressed="false" title="3D lớn (3) · Cuộn để chuyển frame">3D lớn</button>
+    <button type="button" data-fc-layout="table" aria-pressed="true" data-shortcut-title="layout-table" data-shortcut-title-text="Bảng track">Bảng track</button>
+    <button type="button" data-fc-layout="focus" aria-pressed="false" data-shortcut-title="layout-focus" data-shortcut-title-text="Frame lớn · Cuộn để chuyển frame">Frame lớn</button>
+    <button type="button" data-fc-layout="stacked" aria-pressed="false" data-shortcut-title="layout-stacked" data-shortcut-title-text="3D lớn · Cuộn để chuyển frame">3D lớn</button>
    </div>
-   <button id="cqt-fc-pick" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Nạp object đang chọn trên canvas hoặc trong danh sách Objects">Lấy đang chọn</button>
+   <button id="cqt-fc-pick" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" aria-label="Lấy object đang chọn" title="Nạp object đang chọn trên canvas hoặc trong danh sách Objects">${ICONS.crosshair}<span>Lấy đang chọn</span></button>
    <button id="cqt-fc-load" class="cqt-btn cqt-btn-primary cqt-sm cqt-none" title="Nạp cuboid độc lập hoặc track theo Object ID (Enter)">Nạp object</button>
-   <button id="cqt-fc-rescan" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xoá cache và quét lại point cloud mọi frame">${ICONS.refresh}<span>Quét lại Cloud</span></button>
+   <button id="cqt-fc-rescan" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" aria-label="Quét lại Cloud" title="Xoá cache và quét lại point cloud mọi frame">${ICONS.refresh}<span>Quét lại Cloud</span></button>
    <button id="cqt-fc-safedata" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Bật / Tắt Chế độ an toàn dữ liệu (hoặc Tự nạp Cloud đa frame)"></button>
    <div class="cqt-fc-progress" title="Tiến trình nạp point cloud"><div id="cqt-fc-progress-bar"></div></div>
    <span id="cqt-fc-progress-text" class="cqt-label">0%</span>
    <button id="cqt-fc-stop" class="cqt-btn cqt-btn-danger cqt-sm cqt-none" style="display:none;" title="Dừng quét cloud (giữ phần đã nạp)">Dừng</button>
   </div>
   <div class="cqt-fc-head-actions">
-   <button id="cqt-fc-tools" class="cqt-btn cqt-btn-secondary cqt-sm" aria-pressed="false" aria-controls="cvat-quicktool-panel" title="Box, Ground, Track, QA và Cài đặt của Toolbox">Công cụ Toolbox</button>
-   <button id="cqt-fc-edit-limits" class="cqt-btn cqt-btn-secondary cqt-sm" aria-expanded="false" aria-controls="cqt-fc-limits">Limit theo class</button>
-   <button id="cqt-fc-qc" class="cqt-btn cqt-btn-secondary cqt-sm">QA/QC</button>
+   <button id="cqt-fc-tools" class="cqt-btn cqt-btn-secondary cqt-sm" aria-pressed="false" aria-controls="cvat-quicktool-panel" aria-label="Công cụ Toolbox" title="Box, Ground, Track, QA và Cài đặt của Toolbox">${ICONS.cuboid}<span>Công cụ Toolbox</span></button>
+   <button id="cqt-fc-edit-limits" class="cqt-btn cqt-btn-secondary cqt-sm" aria-expanded="false" aria-controls="cqt-fc-limits" aria-label="Limit theo class" title="Limit theo class">${ICONS.sliders}<span>Limit theo class</span></button>
+   <button id="cqt-fc-qc" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="QA/QC" title="QA/QC">${ICONS.chart}<span>QA/QC</span></button>
    <button id="cqt-fc-theme" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Đổi giao diện Sáng (Light) / Tối (Dark)"></button>
-   <button id="cqt-fc-undo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled title="Hoàn tác thao tác gần nhất (${OPTION_KEY}Z)">${ICONS.undo}<span>Undo</span></button>
-   <button id="cqt-fc-redo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled title="Làm lại thao tác vừa hoàn tác (${OPTION_KEY}${IS_MAC ? '⇧Z' : 'Shift+Z'})">${ICONS.redo}<span>Redo</span></button>
+   <button id="cqt-fc-undo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled aria-label="Undo" title="Hoàn tác thao tác gần nhất (${OPTION_KEY}Z)">${ICONS.undo}<span>Undo</span></button>
+   <button id="cqt-fc-redo" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" disabled aria-label="Redo" title="Làm lại thao tác vừa hoàn tác (${shortcutLabel('direct', 'redo')})">${ICONS.redo}<span>Redo</span></button>
    <button id="cqt-fc-max" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" title="Phóng to toàn màn / Thu về cửa sổ"></button>
    <button id="cqt-fc-close" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" title="Đóng (Esc)">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -10780,7 +10922,7 @@ const FC_HTML = `
  <div class="cqt-fc-bar">
   <label class="cqt-fc-ctl" title="Chiều cao ưu tiên của khung trong mỗi frame">Cỡ hàng <input type="range" id="cqt-fc-rowh" min="100" max="360" step="10" /></label>
   <label class="cqt-fc-ctl" title="Phóng to hình chiếu (hoặc Alt/Ctrl + lăn chuột trên danh sách)">Zoom <input type="range" id="cqt-fc-zoom" min="0.5" max="4" step="0.1" /><span id="cqt-fc-zoom-val" class="cqt-label"></span></label>
-  <label class="cqt-fc-ctl" title="Dùng − hoặc + để đổi cỡ điểm trong Full Control">Cỡ điểm <input type="range" id="cqt-fc-point-size" aria-label="Cỡ điểm" min="1" max="${FC_MAX_POINT_SIZE}" step="1" /></label>
+  <label class="cqt-fc-ctl" title="Chỉnh cỡ điểm. Xem phím đã gán trong Cài đặt → Phím tắt.">Cỡ điểm <input type="range" id="cqt-fc-point-size" aria-label="Cỡ điểm" min="1" max="${FC_MAX_POINT_SIZE}" step="1" /></label>
   <span class="cqt-fc-sep"></span>
   <label class="cqt-fc-ctl" title="Giới hạn độ sâu đám mây điểm quanh box để loại bỏ xe/cây ở làn bên cạnh đè vào hình chiếu Side / Front">Lọc điểm
    <select id="cqt-fc-slice" class="cqt-input">
@@ -11116,7 +11258,8 @@ function fcBindWindow(el) {
  });
  fc.resizeObserver.observe(list);
  list.addEventListener('scroll', () => {
-  if (fcLayout() === 'focus' && list.clientHeight && !fc.drag) {
+  const layout = fcLayout();
+  if ((layout === 'focus' || layout === 'stacked') && list.clientHeight && !fc.drag) {
    const index = Math.round(list.scrollTop / list.clientHeight);
    const row = fc.rows[index];
    if (row && row.frame !== fc.focusFrame) {
@@ -11422,11 +11565,9 @@ function fcBindWindow(el) {
  });
  list.addEventListener('wheel', (e) => {
   const canvas = e.target.closest?.('canvas[data-view]');
-  const layout = fcLayout();
-  const focus = layout === 'focus';
   const modified = e.altKey || e.ctrlKey || e.metaKey;
   const view = canvas?.dataset.view;
-  if ((focus || layout === 'stacked') && !modified && !e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+  if (fcLayout() === 'focus' && !modified && !e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
    if (e.target.closest?.('input, select, textarea')) return;
    e.preventDefault();
    if (fc.drag || fc.rows.length < 2 || !list.clientHeight) return;
@@ -11440,12 +11581,7 @@ function fcBindWindow(el) {
    frameWheelDelta += e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? list.clientHeight : 1);
    if (frameWheelDirection === direction || Math.abs(frameWheelDelta) < 45) return;
    frameWheelDirection = direction;
-   if (focus) {
-    void stepFocus(direction);
-    return;
-   }
-   const index = Math.round(list.scrollTop / list.clientHeight);
-   list.scrollTop = clamp(index + direction, 0, fc.rows.length - 1) * list.clientHeight;
+   void stepFocus(direction);
    return;
   }
   const rowEl = canvas?.closest('.cqt-fc-row');
@@ -11532,6 +11668,7 @@ function fcEnsureWindow() {
  el.innerHTML = FC_HTML;
  root.appendChild(el);
  fc.el = el;
+ syncShortcutHints();
  fc.cfg = loadOpts(LS.fcBounds, FC_DEFAULTS);
  fcBindWindow(el);
  syncThemeButtons();
@@ -12140,8 +12277,8 @@ function itemCreate() {
  }
  html += `
   <div class="cqt-item-actions">
-   <button id="cqt-item-get-lwh" class="cqt-btn cqt-btn-secondary cqt-sm" title="Xác nhận lấy LWH hiện tại của object đang chọn nạp vào tool (${OPTION_KEY}C)">Chốt LWH <span class="cqt-kbd">${OPTION_KEY}C</span></button>
-   <button id="cqt-item-sync-track" class="cqt-btn cqt-btn-primary cqt-sm" title="Đồng bộ LWH cho mọi keyframe toàn track (${LWH_SYNC_SHORTCUT})">Đồng bộ <span class="cqt-kbd">${LWH_SYNC_SHORTCUT}</span></button>
+   <button id="cqt-item-get-lwh" class="cqt-btn cqt-btn-secondary cqt-sm" title="Xác nhận lấy LWH hiện tại của object đang chọn nạp vào tool (${OPTION_KEY}C)">Chốt LWH ${shortcutHint('lwh-pin')}</button>
+   <button id="cqt-item-sync-track" class="cqt-btn cqt-btn-primary cqt-sm" title="Đồng bộ LWH cho mọi keyframe toàn track">Đồng bộ ${shortcutHint('lwh-sync')}</button>
   </div>
   <div class="cqt-item-hint">Enter: áp · ${OPTION_KEY}Enter: áp cả nhóm · kéo nhãn để chỉnh</div></div>`;
  el.innerHTML = html;
@@ -12886,7 +13023,7 @@ function populateHealthPop(rootEl, d, curFrame, curRec) {
    syncSec.innerHTML = `
     <div class="cqt-hp-sec-head">
      <span class="cqt-hp-sec-title"><span class="cqt-hp-dot red"></span>Chưa đồng bộ LWH (${unsyncCount}/${d.visFrames.length}F · Chuẩn: ${fmtLWH(d.stdLWH.l, d.stdLWH.w, d.stdLWH.h)})</span>
-     <button class="cqt-btn cqt-btn-primary cqt-sm" data-act="sync-std" title="Đồng bộ toàn bộ keyframe về kích thước chuẩn ${fmtLWH(d.stdLWH.l, d.stdLWH.w, d.stdLWH.h)} (${LWH_SYNC_SHORTCUT})">Đồng bộ chuẩn</button>
+     <button class="cqt-btn cqt-btn-primary cqt-sm" data-act="sync-std" title="Đồng bộ toàn bộ keyframe về kích thước chuẩn ${fmtLWH(d.stdLWH.l, d.stdLWH.w, d.stdLWH.h)}">Đồng bộ chuẩn</button>
     </div>
     <div class="cqt-hp-issue-list">${rowsHtml}${more}</div>
    `;
@@ -13384,9 +13521,9 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 8px 9px; border-top: 1p
 #cqt-fc-window.hide-3d [data-view-cell="3d"] { display: none; }
 .cqt-fc-cols > div { padding: 5px 10px; border-right: 1px solid var(--cqt-border); }
 .cqt-fc-list { flex: 1 1 auto; min-height: 0; overflow-y: scroll; background: var(--cqt-bg); }
-.cqt-fc-list::-webkit-scrollbar { width: 6px; }
+.cqt-fc-list::-webkit-scrollbar { width: 12px; }
 .cqt-fc-list::-webkit-scrollbar-track { background: transparent; }
-.cqt-fc-list::-webkit-scrollbar-thumb { background: var(--cqt-border-btn); border-radius: 99px; }
+.cqt-fc-list::-webkit-scrollbar-thumb { background: var(--cqt-border-btn); border: 2px solid var(--cqt-bg); border-radius: 99px; }
 .cqt-fc-empty { padding: 48px 20px; text-align: center; color: var(--cqt-text-dim); font-size: 12px; }
 .cqt-fc-row { display: grid; grid-template-columns: 156px 1fr 1fr 1fr 1.12fr 214px; height: var(--fc-row-h, 150px); border-bottom: 1px solid var(--cqt-border); background: var(--cqt-bg); transition: background 0.1s; }
 .cqt-fc-row.selected { background: var(--cqt-row-sel); box-shadow: inset 3px 0 0 var(--cqt-pri-bg); }
@@ -13443,7 +13580,7 @@ details.cqt-collapsible .cqt-collapsible-body { padding: 6px 9px 8px; display: f
 `;
 
 const PANEL_HTML = `
-<button type="button" id="cqt-sidebar-rail" aria-label="Mở Cuboid Toolbox" title="Bấm để mở Toolbox (${OPTION_KEY}Q) · Kéo để di chuyển" aria-controls="cvat-quicktool-panel" aria-expanded="false">${ICONS.cuboid}</button>
+<button type="button" id="cqt-sidebar-rail" aria-label="Mở Cuboid Toolbox" data-shortcut-title="toolbox" data-shortcut-title-text="Mở Toolbox · Kéo để di chuyển" aria-controls="cvat-quicktool-panel" aria-expanded="false">${ICONS.cuboid}</button>
 <section id="cvat-quicktool-panel" aria-label="Cuboid Toolbox" inert>
 <div id="cvat-quicktool-header">
 <div class="title">
@@ -13452,7 +13589,7 @@ ${ICONS.cuboid}
 <span>Cuboid Toolbox</span>
 </div>
 <div class="actions">
-<button id="cqt-btn-full-control" title="Mở chế độ Full Control đa frame (${OPTION_KEY}T)">
+<button id="cqt-btn-full-control" data-shortcut-title="full" data-shortcut-title-text="Mở chế độ Full Control đa frame">
 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
 <span>Full</span>
 </button>
@@ -13494,7 +13631,7 @@ ${ICONS.redo}
 <button id="cqt-btn-lock-target" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" title="Khoá Target ID hiện tại (không tự đổi khi click sang box khác)">
 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
 </button>
-<button id="cqt-btn-detect" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Lấy object đang chọn (${OPTION_KEY}A = Lấy object + Tự dò dải frame)">Auto <span class="cqt-kbd">${OPTION_KEY}A</span></button>
+<button id="cqt-btn-detect" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Lấy object đang chọn (${OPTION_KEY}A = Lấy object + Tự dò dải frame)">Auto ${shortcutHint('pick')}</button>
 <button id="cqt-btn-add-selection" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Thêm/bớt object vào nhóm chọn nhiều box (Shift/Cmd + Click trên canvas)">Nhóm (<span id="cqt-multi-count">0</span>)</button>
 </div>
 <span class="cqt-label">F <b id="cqt-current-frame" style="color:var(--cqt-text); font-variant-numeric:tabular-nums;">?</b></span>
@@ -13607,7 +13744,7 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
 <!-- Cụm 1: Smart Snap & Clipboard -->
 <div class="cqt-card">
 <div class="cqt-row">
-<button id="cqt-btn-smart-snap" class="cqt-btn cqt-btn-primary" title="Hút box (hoặc cả Nhóm) theo cụm điểm LiDAR + xoay yaw + chạm đất (${OPTION_KEY}P)">Smart Snap <span class="cqt-kbd">${OPTION_KEY}P</span></button>
+<button id="cqt-btn-smart-snap" class="cqt-btn cqt-btn-primary" title="Hút box (hoặc cả Nhóm) theo cụm điểm LiDAR + xoay yaw + chạm đất (${OPTION_KEY}P)">Smart Snap ${shortcutHint('snap')}</button>
 <label class="cqt-check" style="flex:none;" title="${FIT_SIZE_HINT}"><input type="checkbox" id="cqt-snap-fit-size" /> Đo lại L/W/H</label>
 </div>
 <div class="cqt-row" style="gap:4px;">
@@ -13620,7 +13757,7 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
 <div class="cqt-card">
 <div class="cqt-row" style="justify-content:space-between;">
 <span class="cqt-h">Kích thước LWH (m)</span>
-<button id="cqt-btn-get-lwh" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xác nhận lấy LWH thực tế từ box đang chọn (${OPTION_KEY}C)">Lấy size <span class="cqt-kbd">${OPTION_KEY}C</span></button>
+<button id="cqt-btn-get-lwh" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xác nhận lấy LWH thực tế từ box đang chọn (${OPTION_KEY}C)">Lấy size ${shortcutHint('lwh-pin')}</button>
 </div>
 <div class="cqt-row" style="gap:4px;">
 <select id="cqt-preset-select" class="cqt-input" style="height:25px; padding:2px 6px;" title="Preset LWH theo label"></select>
@@ -13656,7 +13793,7 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
 <div class="cqt-row" style="gap:4px;">
 <button id="cqt-btn-apply-frame" class="cqt-btn cqt-btn-secondary" title="Chỉ sửa LWH tại frame hiện tại">Frame này</button>
 <button id="cqt-btn-apply-lwh" class="cqt-btn cqt-btn-secondary" title="Áp dụng LWH cho dải Start–End">Dải Start–End</button>
-<button id="cqt-btn-sync-track" class="cqt-btn cqt-btn-primary" title="Đồng bộ LWH cho mọi keyframe toàn track (${LWH_SYNC_SHORTCUT})">Toàn track <span class="cqt-kbd">${LWH_SYNC_SHORTCUT}</span></button>
+<button id="cqt-btn-sync-track" class="cqt-btn cqt-btn-primary" title="Đồng bộ LWH cho mọi keyframe toàn track">Toàn track ${shortcutHint('lwh-sync')}</button>
 </div>
 </div>
 <!-- Cụm 3: Sub-label (Thuộc tính) -->
@@ -13716,7 +13853,7 @@ ${lidarGroundFields()}
 <div class="cqt-row" style="justify-content:space-between;">
 <span class="cqt-label" style="color:var(--cqt-text); font-weight:600;">Anchor mặt đất (Xe chuẩn)</span>
 <div class="cqt-row" style="gap:4px;">
-<button id="cqt-btn-anchor-pick-hover" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Trỏ chuột vào cuboid bất kỳ trên 3D rồi bấm ${OPTION_KEY}B để thêm/bỏ Anchor">+ Trỏ <span class="cqt-kbd">${OPTION_KEY}B</span></button>
+<button id="cqt-btn-anchor-pick-hover" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Trỏ chuột vào cuboid bất kỳ trên 3D rồi bấm ${OPTION_KEY}B để thêm/bỏ Anchor">+ Trỏ ${shortcutHint('anchor')}</button>
 <button id="cqt-btn-anchor-clear" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xoá toàn bộ danh sách Anchor (${OPTION_KEY}Shift+B)">Xoá hết</button>
 </div>
 </div>
@@ -13779,11 +13916,11 @@ ${lidarGroundFields()}
 </div>
 <div id="cqt-val-deviation" style="font-weight:500; font-size:11px; color:var(--cqt-text-muted);">Chọn object hoặc bấm Auto (${OPTION_KEY}A) để đo độ lệch hướng</div>
 <div class="cqt-row" style="gap:4px;">
-<button id="cqt-btn-quick-fix-heading" class="cqt-btn cqt-btn-primary cqt-sm" title="Xoay đầu theo hướng di chuyển tại frame hiện tại (${OPTION_KEY}Phift+R)">Nắn theo hướng đi</button>
+<button id="cqt-btn-quick-fix-heading" class="cqt-btn cqt-btn-primary cqt-sm" title="Xoay đầu theo hướng di chuyển tại frame hiện tại ">Nắn theo hướng đi</button>
 <button id="cqt-btn-quick-fix-cloud" class="cqt-btn cqt-btn-secondary cqt-sm" title="Xoay theo cạnh cụm điểm LiDAR tại frame hiện tại">Nắn theo Cloud</button>
 </div>
 <div class="cqt-row" style="gap:4px;">
-<button data-rotate="180" class="cqt-btn cqt-btn-secondary cqt-sm" title="Lật ngược đầu xe 180° (${OPTION_KEY}R)">180° <span class="cqt-kbd">${OPTION_KEY}R</span></button>
+<button data-rotate="180" class="cqt-btn cqt-btn-secondary cqt-sm" title="Lật ngược đầu xe 180° (${OPTION_KEY}R)">180° ${shortcutHint('flip')}</button>
 <button data-rotate="90" class="cqt-btn cqt-btn-secondary cqt-sm">+90°</button>
 <button data-rotate="-90" class="cqt-btn cqt-btn-secondary cqt-sm">-90°</button>
 <input type="number" step="1" id="cqt-rotate-deg" class="cqt-input" value="180" style="width:52px; height:24px; padding:2px 4px;" title="Số độ xoay tuỳ chỉnh" />
@@ -13974,44 +14111,7 @@ ${lidarGroundFields()}
 <label class="cqt-check"><input type="checkbox" id="cqt-set-blender" /> Bật G / W / S khi con trỏ trên canvas 3D</label>
 <label class="cqt-check" title="Dùng khi canvas không tự cập nhật sau khi sửa"><input type="checkbox" id="cqt-set-bounce" /> Làm mới canvas bằng chuyển frame (dự phòng)</label>
 </div>
-<details class="cqt-card cqt-disclosure">
-<summary>Phím tắt Toolbox</summary>
-<div class="cqt-keymap-grid">
-<kbd class="cqt-kbd">${OPTION_KEY}Q / T / V / W / N</kbd><span>Toolbox / Full Control / ô nhìn nhúng / QA/QC / Item</span>
-<kbd class="cqt-kbd">${OPTION_KEY}A / B / P / C</kbd><span>Dò track / đánh dấu Anchor / Smart Snap / chốt LWH</span>
-<kbd class="cqt-kbd">${OPTION_KEY}G → 1–5 → 1–5</kbd><span>Fit Ground · chọn nguồn rồi phạm vi. Enter áp dụng xem trước, Esc hủy.</span>
-<kbd class="cqt-kbd">${OPTION_KEY}H / Shift+H</kbd><span>Xem trước Fit Ground dưới chân ở frame hiện tại / theo dải.</span>
-<kbd class="cqt-kbd">1 / 2 / 3 · − / +</kbd><span>Trong Full Control: đổi bố cục · chỉnh cỡ điểm.</span>
-<kbd class="cqt-kbd">${OPTION_KEY}Y</kbd><span>Fit theo Anchor của từng frame trong dải</span>
-<kbd class="cqt-kbd">${LWH_SYNC_SHORTCUT} / R / X / Z</kbd><span>Đồng bộ LWH / lật 180° / Outside tới hết / Undo</span>
-<kbd class="cqt-kbd">${OPTION_KEY}Shift+B / P / S / R / X / Z</kbd><span>Bỏ Anchor / Snap và đo LWH / đồng bộ dải / nắn hướng / Outside frame / Redo</span>
-</div>
-<p class="cqt-hint">Phím dự phòng: bấm <b>${KEY_PREFIX.split(' → ')[0]}</b>, nhả ra, rồi bấm lệnh dưới đây trong 2,4 giây. Esc để huỷ.</p>
-<p class="cqt-hint" id="cqt-shortcut-conflict" hidden>Tiền tố trùng với một phím CVAT đã cấu hình. Đổi phím đó trong CVAT để dùng chuỗi Toolbox.</p>
-<div class="cqt-keymap-grid">
-<kbd class="cqt-kbd">Q / Shift+Q / &#92;</kbd><span>Mở hoặc thu gọn panel / ẩn hoặc hiện toàn bộ Toolbox (Stealth)</span>
-<kbd class="cqt-kbd">M / V / N</kbd><span>Full Control / ba ô nhìn nhúng / bảng Item</span>
-<kbd class="cqt-kbd">U</kbd><span>Mở không gian QA/QC</span>
-<kbd class="cqt-kbd">A</kbd><span>Chọn object hiện tại và dò dải track</span>
-<kbd class="cqt-kbd">B / Shift+B</kbd><span>Thêm hoặc bỏ Anchor dưới con trỏ / bỏ toàn bộ Anchor</span>
-<kbd class="cqt-kbd">P / Shift+P</kbd><span>Smart Snap / Smart Snap kèm đo lại L/W/H</span>
-<kbd class="cqt-kbd">H / Shift+H</kbd><span>Fit mặt Point Cloud ở frame hiện tại / từng frame trong dải</span>
-<kbd class="cqt-kbd">L / Shift+L / E</kbd><span>Fit theo gốc LiDAR một frame / cả dải / fit dải theo Anchor</span>
-<kbd class="cqt-kbd">C / D / Shift+D</kbd><span>Chốt LWH / đồng bộ toàn track / áp vào dải</span>
-<kbd class="cqt-kbd">R / Shift+R</kbd><span>Lật 180° / nắn hướng di chuyển tại frame hiện tại</span>
-<kbd class="cqt-kbd">, / .</kbd><span>Keyframe trước / sau của object</span>
-<kbd class="cqt-kbd">K / Shift+K</kbd><span>Đặt keyframe theo phạm vi / chỉ frame hiện tại</span>
-<kbd class="cqt-kbd">I / Shift+I</kbd><span>Làm mượt track / nội suy tuyến tính</span>
-<kbd class="cqt-kbd">X / Shift+X</kbd><span>Outside tới hết track / chỉ frame hiện tại</span>
-<kbd class="cqt-kbd">Z / Shift+Z / Y</kbd><span>Undo / Redo / Redo</span>
-<kbd class="cqt-kbd">F / &#96; / Num.</kbd><span>Focus camera vào target</span>
-<kbd class="cqt-kbd">1 / 2 / 3 / 7</kbd><span>Front / Top / Side / Top. Shift để nhìn phía đối diện</span>
-<kbd class="cqt-kbd">Num1 / Num7 / Num3</kbd><span>Front / Top / Side. Shift để nhìn phía đối diện</span>
-<kbd class="cqt-kbd">G / W / S</kbd><span>Trên canvas 3D: di chuyển / xoay / co giãn. Bấm trực tiếp hoặc sau tiền tố.</span>
-</div>
-<p class="cqt-hint">Khi đang kéo: X/Y/Z khoá trục · số, dấu chấm/phẩy và dấu trừ để nhập số · Backspace xoá ký tự · Enter/click trái để áp · Esc/click phải để huỷ · Shift/Ctrl khi kéo để bắt bước.</p>
-<p class="cqt-hint">Trong Item: Enter áp target, ${OPTION_KEY}Enter áp nhóm. Shift/Cmd+click để chọn nhóm trên canvas.</p>
-</details>
+${shortcutSettingsHTML()}
 <div id="cqt-limit-home"><div id="cqt-limit-editor" class="cqt-card">
 <span class="cqt-h">Limit kích thước theo class (m)</span>
 <div class="cqt-limit-class-fields">
@@ -14140,6 +14240,7 @@ function createUI() {
 
  bindPanel(wrapper);
  bindActions(wrapper);
+ bindShortcutSettings();
  writeQAOptionsToUI();
  const s = getSettings();
  applyTheme(s.theme === "light" ? "light" : "dark");
@@ -14292,8 +14393,6 @@ function bindPanel(wrapper) {
    wrapper.querySelectorAll(".cqt-tab").forEach((t) => t.classList.toggle("active", t === tab));
    wrapper.querySelectorAll(".cqt-pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === tab.dataset.tab));
    wrapper.querySelector("#cvat-quicktool-body").scrollTop = 0;
-   const conflict = $('cqt-shortcut-conflict');
-   if (conflict) conflict.hidden = !hasNativePrefix();
    refreshGroundScanRing();
   });
  });
