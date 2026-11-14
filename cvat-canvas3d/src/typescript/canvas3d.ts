@@ -24,6 +24,8 @@ import { Master } from './master';
 interface Canvas3d {
     html(): ViewsDOM;
     getToolboxViews(): Readonly<Views>;
+    getLoadedFrame(): number | null;
+    setGroundScanRing(frame: number, points: readonly (readonly [number, number, number])[] | null): void;
     setup(frameData: any, objectStates: any[]): void;
     isAbleToChangeFrame(): boolean;
     mode(): Mode;
@@ -60,6 +62,14 @@ class Canvas3dImpl implements Canvas3d {
 
     public getToolboxViews(): Readonly<Views> {
         return this.view.getToolboxViews();
+    }
+
+    public getLoadedFrame(): number | null {
+        return this.view.getLoadedFrame();
+    }
+
+    public setGroundScanRing(frame: number, points: readonly (readonly [number, number, number])[] | null): void {
+        this.view.setGroundScanRing(frame, points);
     }
 
     public keyControls(keys: KeyboardEvent): void {
@@ -128,6 +138,7 @@ class Canvas3dImpl implements Canvas3d {
     }
 
     public destroy(): void {
+        this.view.clearGroundScanRing();
         this.model.destroy();
     }
 }

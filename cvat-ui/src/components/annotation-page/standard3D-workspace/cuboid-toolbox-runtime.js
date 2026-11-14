@@ -41,6 +41,126 @@ function fitPlaneLSQ(pts) {
  return { a, b, c: mz - a * mx - b * my };
 }
 
+const FOOT_GROUND_MIN_RADIUS = 0.5;
+const FOOT_GROUND_MAX_RADIUS = 15;
+const FOOT_GROUND_MAX_SLOPE = Math.tan(15 * Math.PI / 180);
+const GROUND_COVERAGE_MASKS = new Set([0b0111, 0b1011, 0b1101, 0b1110, 0b1111]);
+function supportedGroundPlane(samples, tolerance, minimumSupport, fraction, candidatePool = samples) {
+ if (samples.length < minimumSupport) return null;
+ if (candidatePool.length < 3) return null;
+ candidatePool.sort(([x1, y1], [x2, y2]) => x1 - x2 || y1 - y2);
+ const candidateCount = Math.min(candidatePool.length, 24);
+ const candidates = Array.from({ length: candidateCount }, (_, index) =>
+  candidatePool[Math.round(index * (candidatePool.length - 1) / (candidateCount - 1))]);
+ const required = Math.max(minimumSupport, Math.ceil(samples.length * fraction));
+ let best = null;
+ let support = [];
+ let bestError = Infinity;
+ for (let i = 0; i < candidates.length - 2; i++) {
+  for (let j = i + 1; j < candidates.length - 1; j++) {
+   for (let k = j + 1; k < candidates.length; k++) {
+    const plane = fitPlaneLSQ([candidates[i], candidates[j], candidates[k]]);
+    if (!plane || Math.hypot(plane.a, plane.b) > FOOT_GROUND_MAX_SLOPE) continue;
+    const inliers = [];
+    let error = 0;
+    let quadrants = 0;
+    for (const sample of samples) {
+     const [x, y, z] = sample;
+     const residual = Math.abs(z - (plane.a * x + plane.b * y + plane.c));
+     if (residual > tolerance) continue;
+     inliers.push(sample);
+     error += residual ** 2;
+     quadrants |= 1 << ((x >= 0 ? 1 : 0) + (y >= 0 ? 2 : 0));
+    }
+    if (inliers.length < required || !GROUND_COVERAGE_MASKS.has(quadrants)) continue;
+    if (inliers.length > support.length || (inliers.length === support.length && error < bestError)) {
+     best = plane;
+     support = inliers;
+     bestError = error;
+    }
+   }
+  }
+ }
+ if (!best) return null;
+ const plane = fitPlaneLSQ(support);
+ if (!plane || Math.hypot(plane.a, plane.b) > FOOT_GROUND_MAX_SLOPE) return null;
+ return { ...plane, count: support.length };
+}
+
+function addGroundSample(tiles, tileSize, x, y, z) {
+ const key = `${Math.floor(x / tileSize)}:${Math.floor(y / tileSize)}`;
+ let tile = tiles.get(key);
+ if (!tile) { tile = []; tiles.set(key, tile); }
+ tile.push([x, y, z]);
+}
+
+function lowGroundSamples(tiles, minimum, quantile) {
+ return [...tiles.values()].filter((tile) => tile.length >= minimum).map((tile) => {
+  tile.sort((a, b) => a[2] - b[2]);
+  return tile[Math.floor((tile.length - 1) * quantile)];
+ });
+}
+
+export function estimateFootGround(positions, { x: originX, y: originY, bottom, radius, halfLength, halfWidth, yaw }) {
+ if (!positions?.length || ![originX, originY, bottom, radius, halfLength, halfWidth, yaw].every(Number.isFinite) || radius <= 0) return null;
+ const radiusSquared = radius ** 2;
+ const cos = Math.cos(yaw), sin = Math.sin(yaw);
+ const margins = [0.45, 0.9, 1.5];
+ const maxMargin = margins.at(-1);
+ const tileSize = Math.min(0.35, Math.max(0.14, Math.min(halfLength, halfWidth) * 0.65));
+ const near = [];
+ for (let i = 0; i + 2 < positions.length; i += 3) {
+  const x = positions[i] - originX, y = positions[i + 1] - originY, z = positions[i + 2];
+  if (!Number.isFinite(z) || !(x * x + y * y <= radiusSquared) || z < bottom - 1.5 || z > bottom + 0.75) continue;
+  const u = x * cos + y * sin, v = -x * sin + y * cos;
+  if (Math.abs(u) <= halfLength + maxMargin && Math.abs(v) <= halfWidth + maxMargin) near.push([u, v, z]);
+ }
+ // Widen only when the footprint and its immediate edges have insufficient coverage.
+ for (const margin of margins) {
+  const tiles = new Map();
+  for (const [u, v, z] of near) {
+   if (Math.abs(u) <= halfLength + margin && Math.abs(v) <= halfWidth + margin) addGroundSample(tiles, tileSize, u, v, z);
+  }
+  const plane = supportedGroundPlane(lowGroundSamples(tiles, 3, 0.2), 0.035, 6, 0.45);
+  if (!plane) continue;
+  const a = plane.a * cos - plane.b * sin, b = plane.a * sin + plane.b * cos;
+  return { a, b, c: plane.c - a * originX - b * originY, count: plane.count };
+ }
+ return null;
+}
+
+export function estimateSceneGround(positions) {
+ if (!positions?.length) return null;
+ const xs = [], ys = [];
+ const sampleStep = 3 * Math.max(1, Math.ceil(positions.length / 12000));
+ for (let i = 0; i + 2 < positions.length; i += sampleStep) {
+  if (![positions[i], positions[i + 1], positions[i + 2]].every(Number.isFinite)) continue;
+  xs.push(positions[i]);
+  ys.push(positions[i + 1]);
+ }
+ if (xs.length < 12) return null;
+ xs.sort((a, b) => a - b);
+ ys.sort((a, b) => a - b);
+ const lo = Math.floor(xs.length * 0.02), hi = xs.length - 1 - lo;
+ const mid = Math.floor(xs.length / 2);
+ const originX = xs[mid], originY = ys[mid];
+ const tileSize = Math.max(0.5, Math.hypot(xs[hi] - xs[lo], ys[hi] - ys[lo]) / 24);
+ const tiles = new Map();
+ const stride = 3 * Math.max(1, Math.ceil(positions.length / 540000));
+ for (let i = 0; i + 2 < positions.length; i += stride) {
+  const x = positions[i] - originX, y = positions[i + 1] - originY, z = positions[i + 2];
+  if ([x, y, z].every(Number.isFinite)) addGroundSample(tiles, tileSize, x, y, z);
+ }
+ const samples = lowGroundSamples(tiles, 4, 0.12);
+ if (samples.length < 12) return null;
+ const heights = samples.map((point) => point[2]).sort((a, b) => a - b);
+ const ceiling = heights[Math.floor(heights.length * 0.45)] + 0.25;
+ // Seed from low returns, then evaluate the plane against tiles from the entire scene.
+ const lower = samples.filter((point) => point[2] <= ceiling);
+ const plane = supportedGroundPlane(samples, 0.18, 12, 0.13, lower);
+ return plane && { ...plane, c: plane.c - plane.a * originX - plane.b * originY };
+}
+
 // Fit the lowest supported surface in tiles around the sensor.
 export function estimateLidarOriginGround(positions, [originX, originY], radius = 6) {
  if (!positions || !Number.isFinite(originX) || !Number.isFinite(originY) || !(radius > 1.25)) return null;
@@ -86,7 +206,7 @@ export function estimateLidarOriginGround(positions, [originX, originY], radius 
 }
 
 export default function mountCuboidToolbox({
- job, store, changeFrame, refreshAnnotations, selectObject,
+ job, store, changeFrame, refreshAnnotations, selectObject, decodePointCloud,
 }) {
  const scope = new AbortController();
  const root = document.createElement('div');
@@ -106,10 +226,11 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '4.8.4';
+const VERSION = '4.9.4';
 const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
+const LWH_SYNC_SHORTCUT = IS_MAC ? '⌥D' : 'Alt+S';
 const FIT_SIZE_HINT = 'Dùng cho Smart Snap. Bật để đo lại chiều dài, rộng và cao từ cụm điểm. Tắt để giữ kích thước hiện tại.';
 const KEY_PREFIX = IS_MAC ? '⌥⇧Q → ' : 'Alt+Shift+Q → ';
 
@@ -210,6 +331,8 @@ const DEFAULT_SETTINGS = {
  itemCollapsed: true,
  blenderKeys: true, // G/W/S sau tiền tố, trên canvas 3D
  lidarGroundRadius: 6,
+ footGroundRadius: '',
+ footGroundRing: true,
  lidarOriginX: '',
  lidarOriginY: '',
  bounceRefresh: false, // làm mới canvas bằng cách chuyển frame (chậm, dự phòng)
@@ -892,11 +1015,11 @@ async function getStates(frame) {
  return job.annotations.get(frame, true);
 }
 
-async function getState(id, frame) {
+async function getState(id, frame, clientIDOnly = false) {
  const states = await getStates(frame);
  const key = String(id);
  return states.find((s) => String(s.clientID) === key) ||
-  states.find((s) => s.serverID !== undefined && String(s.serverID) === key) ||
+  (!clientIDOnly && states.find((s) => s.serverID !== undefined && String(s.serverID) === key)) ||
   null;
 }
 
@@ -991,6 +1114,15 @@ function getCanvas3dViews() {
  const views = canvas?.getToolboxViews?.() ?? canvas?.view?.views ?? null;
  if (views) lastViews = views;
  return views;
+}
+
+function loadedCloudFrame() {
+ const canvas = annotationState()?.canvas?.instance;
+ if (typeof canvas?.getLoadedFrame === 'function') return canvas.getLoadedFrame();
+ // The userscript runs on CVAT builds without the Toolbox canvas API.
+ const data = canvas?.model?.data;
+ if (!data?.image || data.isFrameUpdating || data.imageIsDeleted || !Number.isInteger(data.imageID)) return null;
+ return getCanvas3dViews()?.perspective?.scene?.children?.[0]?.isPoints ? data.imageID : null;
 }
 
 function getPerspectiveView() {
@@ -1115,6 +1247,7 @@ function showToast(clean, type = 'info', keyBadge = '') {
  if (!t) {
   t = document.createElement('div');
   t.id = 'cqt-toast';
+  t.setAttribute('role', 'status');
   root.appendChild(t);
  }
  t.textContent = '';
@@ -1184,7 +1317,7 @@ function syncSafeDataUI() {
   btn.classList.toggle('cqt-fc-safedata-on', on);
   btn.title = on
    ? 'Đang BẬT Chế độ an toàn dữ liệu: chỉ dùng cloud của frame đang xem (không tự chuyển frame).\nBấm để chuyển sang "Tự nạp Cloud: BẬT" (tự động quét Point Cloud cho các frame trong Track).'
-   : 'Đang BẬT Tự nạp Cloud (tắt Chế độ an toàn): tự động chuyển frame nạp Point Cloud cho Track.\nBấm để BẬT lại Chế độ an toàn dữ liệu.';
+   : 'Đang BẬT Tự nạp Cloud: nạp Point Cloud cho Track trong Full Control.\nBấm để BẬT lại Chế độ an toàn dữ liệu.';
  }
 }
 
@@ -1343,7 +1476,7 @@ async function applySnapshotItems(items) {
  const reverseSnapshot = [];
  for (const item of [...items].reverse()) {
   try {
-   const s = await getState(item.clientID, item.frame);
+   const s = await getState(item.clientID, item.frame, true);
    if (!s) continue;
    reverseSnapshot.push(snapshotItem(s, item.frame));
    // Không gỡ keyframe (quy định dự án): frame vốn nội suy sẽ giữ keyframe, nhưng về đúng giá trị cũ
@@ -1539,7 +1672,7 @@ async function editRange(label, opts, mutate) {
 }
 
 // Các frame có object (mặc định bỏ qua outside; truyền { includeOutside: true } để lấy cả frame outside)
-async function collectTrack(id, from, to, { includeOutside = false } = {}) {
+async function collectTrack(id, from, to, { includeOutside = false, clientIDOnly = false } = {}) {
  const b = jobBounds();
  if (b) {
   from = Math.max(from, b.start);
@@ -1551,7 +1684,7 @@ async function collectTrack(id, from, to, { includeOutside = false } = {}) {
    setStatus(`⏳ Đọc #${id}: frame ${f}/${to}...`);
    await sleep(0);
   }
-  const s = await getState(id, f);
+  const s = await getState(id, f, clientIDOnly);
   if (isCuboid(s) && (includeOutside || !s.outside)) out.push({ frame: f, state: s });
  }
  return out;
@@ -1751,7 +1884,7 @@ function setReferenceBoxIds(ids) {
  setField('cqt-ground-ref-ids', formatted);
  setField('cqt-fc-ground-anchor-ids', formatted);
  for (const prefix of ['cqt-ground-', 'cqt-fc-ground-']) {
-  if (val(prefix + 'kind') === 'anchor-range') renderGroundResult($(prefix + 'result'), new Set());
+  if (val(prefix + 'kind') === 'anchor') renderGroundResult($(prefix + 'result'), new Set());
  }
  renderAnchorChips();
  invalidateHealthCache();
@@ -1937,28 +2070,29 @@ async function ensureGroundPlane() {
 }
 
 async function resolveGroundRange(targetId) {
- const scope = val('cqt-ground-scope') || 'current_to_end';
+ const range = val('cqt-ground-scope') || 'current';
  const curFrame = getFrame();
  if (!Number.isInteger(curFrame)) {
   fail('Không đọc được frame hiện tại.');
   return null;
  }
- if (scope === 'current') {
+ if (range === 'current') {
   return { from: curFrame, to: curFrame, keyframesOnly: false };
+ }
+ if (range === 'track' || range === 'current_to_end') {
+  const bounds = jobBounds();
+  if (!bounds) return null;
+  return { from: range === 'track' ? bounds.start : curFrame, to: bounds.stop, keyframesOnly: false };
  }
 
  let start = intVal('cqt-frame-start');
  let end = intVal('cqt-frame-end');
 
- // Nếu start/end chưa có hoặc start === end === curFrame, tự động dò span của track
- if (!Number.isInteger(start) || !Number.isInteger(end) || start > end || (start === end && start === curFrame)) {
+ if (!Number.isInteger(start) || !Number.isInteger(end)) {
   const span = await detectSpan(targetId);
   if (span) {
    start = span.startFrame;
    end = span.endFrame;
-   setField('cqt-frame-start', start);
-   setField('cqt-frame-end', end);
-   setField('cqt-frame-count', end - start + 1);
   }
  }
 
@@ -1967,26 +2101,7 @@ async function resolveGroundRange(targetId) {
   return null;
  }
 
- let from = start, to = end;
- if (scope === 'current_to_end') {
-  from = curFrame;
-  to = end;
-  if (from > to) {
-   fail(`Frame hiện tại (${curFrame}) lớn hơn End frame (${end}).`);
-   return null;
-  }
- }
-
- const keyframesOnly = scope === 'keyframes';
- return { from, to, keyframesOnly };
-}
-
-function groundRange(range) {
- const scope = val('cqt-ground-scope') || 'current_to_end';
- const f = getFrame();
- if (scope === 'current') return Number.isInteger(f) ? { from: f, to: f } : null;
- if (scope === 'current_to_end' && Number.isInteger(f)) return { from: f, to: range.endFrame };
- return { from: range.startFrame, to: range.endFrame };
+ return { from: start, to: end, keyframesOnly: range === 'keyframes' };
 }
 
 async function checkGround() {
@@ -2048,15 +2163,23 @@ async function lidarOriginPlaneAtFrame(job, frame) {
 }
 
 const GROUND_FIT_CHOICES = {
- 'cloud-frame': 'Mặt Point Cloud · frame',
- 'cloud-range': 'Mặt Point Cloud · dải',
- 'lidar-origin-frame': 'Gốc tọa độ LiDAR · frame',
- 'lidar-origin-range': 'Gốc tọa độ LiDAR · dải',
- 'lidar-frame': 'Cloud quanh LiDAR · frame',
- 'lidar-range': 'Cloud quanh LiDAR · dải',
- 'anchor-range': 'Anchor · dải',
+ cloud: 'Point Cloud dưới chân',
+ scene: 'Mặt đất toàn cảnh',
+ 'lidar-origin': 'Gốc tọa độ LiDAR',
+ lidar: 'Point Cloud quanh LiDAR',
+ anchor: 'Anchor',
 };
-const usesLidarRadius = (kind) => kind === 'lidar-frame' || kind === 'lidar-range';
+function groundScopeChoices(fullControl) {
+ return {
+  current: 'Frame hiện tại',
+  current_to_end: 'Frame hiện tại → Hết object',
+  selected: fullControl ? 'Các frame đã chọn' : 'Dải Start–End',
+  track: 'Toàn bộ frame hiện diện',
+  keyframes: fullControl ? 'Keyframe đã chọn' : 'Keyframe trong dải Start–End',
+ };
+}
+const usesFootGround = (kind) => kind === 'cloud';
+const groundUsesPreview = (kind) => usesFootGround(kind) || kind === 'scene';
 const GROUND_FIT_MODES = {
  snap: 'Snap đáy (giữ nghiêng)',
  flat: 'Đặt phẳng (rx=ry=0)',
@@ -2064,6 +2187,362 @@ const GROUND_FIT_MODES = {
 };
 const GROUND_FIT_DIRECTIONS = { both: 'Cả hai', down: 'Chỉ hạ', up: 'Chỉ nâng' };
 const LIDAR_ORIGIN_HINT = 'Dùng mặt XY của cảm biến từ VIEWPOINT trong PCD. Nếu thiếu VIEWPOINT, dùng Z = 0 của frame.';
+const FOOT_GROUND_COLOR = '#22d3ee';
+let footGroundPreview = null;
+let groundPreviewRequest = 0;
+let groundPreviewComputing = false;
+let groundScanRing = null;
+let groundScanOverlay = null;
+let groundScanOverlayRaf = 0;
+let measuredFootGround = null;
+
+function footGroundRegion(points, radius) {
+ const R = rotationMatrix(points[3], points[4], points[5]);
+ const halfHeight = Math.abs(points[8]) / 2;
+ return {
+  x: points[0] - R[0][2] * halfHeight,
+  y: points[1] - R[1][2] * halfHeight,
+  bottom: points[2] - R[2][2] * halfHeight,
+  radius: radius ?? clamp(0.5 * Math.hypot(points[6], points[7]) + 1, FOOT_GROUND_MIN_RADIUS, FOOT_GROUND_MAX_RADIUS),
+  halfLength: Math.abs(points[6]) / 2,
+  halfWidth: Math.abs(points[7]) / 2,
+  yaw: points[5],
+ };
+}
+
+function groundScanRingPoints(region, plane) {
+ const { x, y, radius, bottom } = region;
+ return Array.from({ length: 64 }, (_, i) => {
+  const angle = i * Math.PI / 32;
+  const px = x + radius * Math.cos(angle), py = y + radius * Math.sin(angle);
+  return [px, py, (plane ? planeZ(plane, px, py) : bottom) + 0.015];
+ });
+}
+
+function footGroundFields(prefix) {
+ return `<div id="${prefix}foot-fields" class="cqt-row cqt-wrap cqt-ground-controls" hidden>
+  <label class="cqt-col"><span class="cqt-label">Bán kính quét (m)</span>
+   <input id="${prefix}radius" class="cqt-input cqt-foot-ground-radius" type="number" min="${FOOT_GROUND_MIN_RADIUS}" max="${FOOT_GROUND_MAX_RADIUS}" step="any" placeholder="Tự động" title="Giới hạn vùng quét. Tool ưu tiên điểm sát đáy cuboid. Để trống để tính theo kích thước cuboid." />
+  </label>
+  <label class="cqt-check"><input type="checkbox" id="${prefix}ring" /> Hiện vòng quét 3D</label>
+ </div>`;
+}
+
+function footGroundRadius(prefix) {
+ const input = $(prefix + 'radius');
+ return input.validity.badInput || !input.validity.valid ? NaN : input.value === '' ? null : input.valueAsNumber;
+}
+
+function bindFootGroundFields(on, prefix) {
+ setField(prefix + 'radius', getSettings().footGroundRadius);
+ $(prefix + 'ring').checked = getSettings().footGroundRing;
+ on(prefix + 'radius', (event) => {
+  const radius = footGroundRadius(prefix);
+  event.target.setAttribute('aria-invalid', String(Number.isNaN(radius)));
+  if (!Number.isNaN(radius)) {
+   lsSet(LS.settings, { ...getSettings(), footGroundRadius: event.target.value });
+   const other = prefix === 'cqt-ground-' ? 'cqt-fc-ground-' : 'cqt-ground-';
+   setField(other + 'radius', event.target.value);
+   $(other + 'radius')?.setAttribute('aria-invalid', 'false');
+  }
+  clearFootGroundPreview();
+  measuredFootGround = null;
+  fcRerenderVisible('3d');
+  refreshGroundScanRing();
+ }, 'input');
+ on(prefix + 'ring', (event) => {
+  const checked = event.target.checked;
+  lsSet(LS.settings, { ...getSettings(), footGroundRing: checked });
+  for (const id of ['cqt-ground-ring', 'cqt-fc-ground-ring']) if ($(id)) $(id).checked = checked;
+  fcRerenderVisible('3d');
+  refreshGroundScanRing();
+ }, 'change');
+}
+
+function fcFootGroundRing(row) {
+ if (!fc.open || row.outside || $('cqt-fc-ground-controls').hidden ||
+     !usesFootGround(val('cqt-fc-ground-kind')) || !isChecked('cqt-fc-ground-ring')) return null;
+ const radius = footGroundRadius('cqt-fc-ground-');
+ if (Number.isNaN(radius)) return null;
+ const preview = footGroundPreview?.fullControl && footGroundPreview.rows.get(`${row.frame}:${fc.targetId}`);
+ const points = fcPoints(row);
+ const region = footGroundRegion(points, radius);
+ const plane = preview && fcSamePoints(points, preview.before) ? preview.plane : null;
+ return groundScanRingPoints(region, plane);
+}
+
+function drawGroundScanOverlay() {
+ groundScanOverlayRaf = 0;
+ const ring = groundScanRing;
+ if (!ring || ring.native || scope.signal.aborted) return;
+ const view = getPerspectiveView();
+ const rect = canvasRect();
+ const visible = !!(rect && view?.camera && ring.frame === getFrame() && ring.frame === loadedCloudFrame());
+ groundScanOverlay.style.display = visible ? '' : 'none';
+ if (visible) {
+  const camera = view.camera;
+  camera.updateMatrixWorld();
+  const context = groundScanOverlay.getContext('2d');
+  const width = Math.ceil(rect.width), height = Math.ceil(rect.height);
+  if (groundScanOverlay.width !== width) groundScanOverlay.width = width;
+  if (groundScanOverlay.height !== height) groundScanOverlay.height = height;
+  Object.assign(groundScanOverlay.style, { left: `${rect.left}px`, top: `${rect.top}px` });
+  context.clearRect(0, 0, width, height);
+  context.beginPath();
+  let connected = false;
+  for (const point of [...ring.points, ring.points[0]]) {
+   const viewPoint = applyMat4(camera.matrixWorldInverse.elements, point);
+   if (viewPoint[2] >= -camera.near) { connected = false; continue; }
+   const [x, y] = applyMat4(camera.projectionMatrix.elements, viewPoint);
+   if (!Number.isFinite(x) || !Number.isFinite(y)) { connected = false; continue; }
+   const px = (x + 1) * width / 2, py = (1 - y) * height / 2;
+   if (connected) context.lineTo(px, py);
+   else context.moveTo(px, py);
+   connected = true;
+  }
+  context.strokeStyle = FOOT_GROUND_COLOR;
+  context.lineWidth = 1.5;
+  context.stroke();
+ }
+ groundScanOverlayRaf = requestAnimationFrame(drawGroundScanOverlay);
+}
+
+function clearGroundScanRing() {
+ if (groundScanRing?.native) groundScanRing.canvas.setGroundScanRing(groundScanRing.frame, null);
+ groundScanRing = null;
+ if (groundScanOverlay) groundScanOverlay.style.display = 'none';
+ cancelAnimationFrame(groundScanOverlayRaf);
+ groundScanOverlayRaf = 0;
+}
+
+function refreshGroundScanRing() {
+ const annotation = annotationState();
+ const canvas = annotation?.canvas?.instance;
+ const frame = getFrame();
+ let points = null;
+ if (loadedCloudFrame() === frame && Number.isInteger(frame) && !stealthUI) {
+  if (fc.open && !fc.toolsOpen) {
+   const row = fcRowByFrame(frame);
+   if (row) points = fcFootGroundRing(row);
+  } else if (panelApi?.getState() !== 'collapsed' && root.querySelector('[data-pane="ground"].active') &&
+      usesFootGround(val('cqt-ground-kind')) && isChecked('cqt-ground-ring')) {
+   const id = resolveTargetId();
+   const state = annotation.annotations.states.find((s) => s.clientID === id);
+   const radius = footGroundRadius('cqt-ground-');
+   if (isCuboid(state) && !state.outside && state.frame === frame && !Number.isNaN(radius)) {
+    const measured = measuredFootGround;
+    const plane = measured?.frame === frame && measured.id === id && measured.radius === radius &&
+     fcSamePoints(state.points, measured.points) ? measured.plane : null;
+    points = groundScanRingPoints(footGroundRegion(state.points, radius), plane);
+   }
+  }
+ }
+ const key = points ? `${frame}:${points.flat().join(',')}` : null;
+ if (groundScanRing?.canvas === canvas && groundScanRing?.key === key) return;
+ if (groundScanRing) clearGroundScanRing();
+ if (!points) return;
+ const native = typeof canvas?.setGroundScanRing === 'function';
+ groundScanRing = { canvas, frame, key, native, points };
+ if (native) {
+  canvas.setGroundScanRing(frame, points);
+ } else {
+  if (!groundScanOverlay) {
+   groundScanOverlay = document.createElement('canvas');
+   groundScanOverlay.id = 'cqt-ground-scan-overlay';
+   groundScanOverlay.setAttribute('aria-hidden', 'true');
+   root.appendChild(groundScanOverlay);
+  }
+  drawGroundScanOverlay();
+ }
+}
+
+async function footGroundCloud(frame) {
+ if (getFrame() === frame) {
+  for (let i = 0; i < 30 && getFrame() === frame; i++) {
+   if (loadedCloudFrame() === frame) {
+    const positions = getPointCloudPositions();
+    if (positions?.length) return positions;
+    break;
+   }
+   await sleep(50);
+  }
+ }
+ return fullSceneCache.get(sceneKey(frame)) || (!safeData() && fcCanReadCloud ? await fcReadFrameCloud(frame) : null);
+}
+
+function clearFootGroundPreview() {
+ groundPreviewRequest++;
+ const hadPreview = !!footGroundPreview;
+ footGroundPreview = null;
+ for (const [resultId, buttonId] of [
+  ['cqt-fc-ground-result', 'cqt-fc-ground-apply'], ['cqt-ground-result', 'cqt-btn-ground-apply'],
+ ]) {
+  const result = $(resultId);
+  if (result?.querySelector('[data-foot-ground-preview]')) renderGroundResult(result, new Set());
+  const button = $(buttonId);
+  if (button) button.hidden = true;
+ }
+ if (hadPreview) {
+  fcRerenderVisible('3d');
+  refreshGroundScanRing();
+ }
+}
+
+function footGroundSelectionKey(fullControl) {
+ const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
+ const kind = val(prefix + 'kind');
+ const radius = usesFootGround(kind) ? footGroundRadius(prefix) : null;
+ const range = val(prefix + 'scope');
+ const frames = fullControl ? fcGroundFrames(range) :
+  range === 'current' || range === 'current_to_end' ? [getFrame()] :
+   range === 'track' ? [] : [val('cqt-frame-start'), val('cqt-frame-end')];
+ const ids = fullControl ? [fc.targetId, fc.loadRequest] : selectedOrTarget();
+ return JSON.stringify([ids, kind, range, Number.isNaN(radius) ? 'invalid' : radius,
+  val(prefix + 'mode'), val(prefix + 'direction'), frames]);
+}
+
+async function previewFootGround(fullControl, focusApply = false) {
+ if (groundFitting || fc.busy || fc.harvesting || isToolBusy()) return fail('Đang xử lý thao tác trước, thử lại khi hoàn tất.');
+ const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
+ const kind = val(prefix + 'kind');
+ if (!groundUsesPreview(kind)) return;
+ const foot = usesFootGround(kind);
+ const radius = foot ? footGroundRadius(prefix) : null;
+ if (Number.isNaN(radius)) return fail(`Nhập bán kính từ ${FOOT_GROUND_MIN_RADIUS} đến ${FOOT_GROUND_MAX_RADIUS} m, hoặc để trống để tự động.`);
+ const ids = fullControl ? [fc.targetId].filter(Number.isInteger) : selectedOrTarget();
+ if (!ids.length) return fail('Chọn cuboid mục tiêu.');
+ const job = getJob(), range = val(prefix + 'scope');
+ const mode = val(prefix + 'mode'), direction = val(prefix + 'direction');
+ const key = footGroundSelectionKey(fullControl);
+ clearFootGroundPreview();
+ const request = groundPreviewRequest;
+ const rows = new Map();
+ const missingCloud = new Set(), missingGround = new Set();
+ let protectedCount = 0, candidates = 0;
+ groundFitting = true;
+ groundPreviewComputing = true;
+ const previewButton = $(fullControl ? 'cqt-fc-ground-preview' : 'cqt-btn-ground-preview');
+ previewButton.disabled = true;
+ try {
+  const isCurrent = () => getJob() === job && (!fullControl || fc.open) &&
+   request === groundPreviewRequest && footGroundSelectionKey(fullControl) === key;
+  const frames = await getGroundFitFrames(range, ids[0], fullControl);
+  if (!frames || !isCurrent()) return;
+  if (!frames.length) return fail('Chọn frame có cuboid cần xử lý.');
+  for (const frame of frames) {
+   if (!isCurrent()) return;
+   if (frames.length > 1) {
+    setStatus(`Đang xem trước Fit Ground · F${frame} / F${frames.at(-1)}`, 'info', { silentToast: true });
+    await sleep(0);
+    if (!isCurrent()) return;
+   }
+   const states = await getGroundFitStates(ids, frame, range === 'keyframes', fullControl);
+   if (!isCurrent()) return;
+   candidates += states.length;
+   const editable = states.filter((state) => !state.lock && !state.isGroundTruth);
+   protectedCount += states.length - editable.length;
+   if (!editable.length) continue;
+   const positions = await footGroundCloud(frame);
+   if (!isCurrent()) return;
+   if (!positions?.length) { missingCloud.add(frame); continue; }
+   const scenePlane = foot ? null : estimateSceneGround(positions);
+   for (const state of editable) {
+    const before = [...state.points];
+    const region = foot ? footGroundRegion(before, radius) : null;
+    const plane = region ? estimateFootGround(positions, region) : scenePlane;
+    if (!plane) { missingGround.add(frame); continue; }
+    const after = fitToGround(before, plane, mode);
+    const dz = after[2] - before[2];
+    const directionMatches = (direction !== 'down' || dz <= 1e-4) && (direction !== 'up' || dz >= -1e-4);
+    const changed = directionMatches && (Math.abs(dz) >= 1e-4 || Math.abs(after[3] - before[3]) > 1e-6 || Math.abs(after[4] - before[4]) > 1e-6);
+    const id = state.clientID;
+    rows.set(`${frame}:${id}`, { frame, id, before, after, plane, dz, radius: region?.radius, changed, directionMatches, keyframe: isKey(state) });
+   }
+  }
+  if (!isCurrent()) return;
+  if (!candidates) return fail('Không có cuboid hiện trên các frame trong phạm vi fit.');
+  const edits = [...rows.values()].filter((row) => row.changed);
+  const newKeys = edits.filter((row) => !row.keyframe).length;
+  const summary = `Dự kiến chỉnh ${edits.length}/${candidates} ${ids.length === 1 ? 'frame' : 'lượt'}` +
+   (newKeys ? ` · ${newKeys} keyframe mới` : '') + (protectedCount ? ` · ${protectedCount} cuboid được bảo vệ` : '');
+  const missing = (frames, label) => frames.size ? `<div>${label} (${frames.size}) · ${formatFrameRanges([...frames]).map(({ from, text }) =>
+   `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${from}">${text}</button>`).join(' ')}</div>` : '';
+  const result = $(prefix + 'result');
+  result.hidden = false;
+  const frameResults = [...rows.values()].map((row) => {
+   let adjustment = 'Bỏ qua theo hướng';
+   if (row.directionMatches) {
+    adjustment = `ΔZ ${fmtSigned(row.dz, 3)} m`;
+    if (mode === 'tilt') {
+     const { pitch, roll } = fcGetPitchRoll(row.after);
+     adjustment += ` · Pitch ${fmtSigned(pitch * DEG, 1)}° · Roll ${fmtSigned(roll * DEG, 1)}°`;
+    }
+   }
+   const area = row.radius === undefined ? 'Toàn cảnh' : `Bán kính ${row.radius.toFixed(2)} m`;
+   const object = ids.length > 1 ? ` · #${row.id}` : '';
+   return `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-ground-jump="${row.frame}" title="${area} · ${row.plane.count} ô có điểm mặt đất">F${row.frame}${object} · ${adjustment}</button>`;
+  }).join('');
+  result.innerHTML = `<div data-foot-ground-preview><div>${summary}</div>${rows.size ? `<details ${rows.size <= 6 ? 'open' : ''}>
+   <summary>Kết quả từng frame</summary><div class="cqt-row cqt-wrap">${frameResults}</div></details>` : ''}
+   ${missing(missingCloud, 'Chưa có point cloud')}${missing(missingGround, 'Điểm mặt đất chưa đủ tin cậy')}
+   ${newKeys ? '<div>Undo khôi phục tọa độ và giữ các keyframe mới.</div>' : ''}</div>`;
+  footGroundPreview = { key, fullControl, rows, kind };
+  const applyButton = $(fullControl ? 'cqt-fc-ground-apply' : 'cqt-btn-ground-apply');
+  applyButton.hidden = !edits.length;
+  if (focusApply && edits.length) applyButton.focus({ preventScroll: true });
+  fcRerenderVisible('3d');
+  refreshGroundScanRing();
+  setStatus(summary, missingCloud.size || missingGround.size ? 'warn' : 'info', { silentToast: true });
+ } finally {
+  groundPreviewComputing = false;
+  groundFitting = false;
+  previewButton.disabled = false;
+ }
+}
+
+async function applyFootGroundPreview(fullControl) {
+ const preview = footGroundPreview;
+ if (!preview || preview.fullControl !== fullControl || preview.key !== footGroundSelectionKey(fullControl)) {
+  clearFootGroundPreview();
+  return fail('Phạm vi hoặc tuỳ chọn đã đổi. Bấm Xem trước để tính lại.');
+ }
+ if (groundFitting || fc.busy || fc.harvesting || isToolBusy()) return fail('Đang xử lý thao tác trước, thử lại khi hoàn tất.');
+ const button = $(fullControl ? 'cqt-fc-ground-apply' : 'cqt-btn-ground-apply');
+ const job = getJob(), target = fc.targetId;
+ const isCurrent = () => getJob() === job && (!fullControl || (fc.open && fc.targetId === target));
+ groundFitting = true;
+ button.disabled = true;
+ try {
+  const edits = [];
+  for (const row of preview.rows.values()) {
+   if (!row.changed) continue;
+   const state = await getState(row.id, row.frame, true);
+   if (!isCuboid(state) || state.outside || state.lock || state.isGroundTruth || !fcSamePoints(state.points, row.before) || isKey(state) !== row.keyframe) {
+    clearFootGroundPreview();
+    return fail(`F${row.frame} đã thay đổi. Bấm Xem trước để tính lại.`);
+   }
+   edits.push({ frame: row.frame, state, after: row.after });
+  }
+  if (footGroundPreview !== preview || !isCurrent() || preview.key !== footGroundSelectionKey(fullControl) || !edits.length) return;
+  const label = GROUND_FIT_CHOICES[preview.kind];
+  const batch = createBatch(`Fit Ground · ${label}`);
+  try {
+   for (const { frame, state, after } of edits) {
+    if (!isCurrent()) break;
+    await batch.edit(state, frame, (current) => fcSetPoints(current, after));
+   }
+  } finally {
+   const result = await batch.finish(getJob() === job);
+   clearFootGroundPreview();
+   if (fc.open && !fc.toolsOpen) await fcReloadStates();
+   setStatus(`Fit Ground · ${label} · Đã chỉnh ${result.changed}/${edits.length} ${new Set(edits.map((edit) => edit.state.clientID)).size > 1 ? 'lượt' : 'frame'}.` + editSuffix(result),
+    result.errors || result.changed !== edits.length || !result.restored ? 'warn' : 'success');
+  }
+ } finally {
+  groundFitting = false;
+  button.disabled = false;
+ }
+}
 const LIDAR_GROUND_FIELDS = {
  'origin-x': { label: 'X (m)', step: '0.01', placeholder: 'Tự động', setting: 'lidarOriginX' },
  'origin-y': { label: 'Y (m)', step: '0.01', placeholder: 'Tự động', setting: 'lidarOriginY' },
@@ -2107,36 +2586,49 @@ function groundFitSelect(id, label, choices) {
 function syncGroundFitControls(fullControl) {
  const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
  const kind = val(prefix + 'kind');
- const anchor = kind === 'anchor-range';
+ const anchor = kind === 'anchor';
+ const foot = usesFootGround(kind);
+ const cloudPreview = groundUsesPreview(kind);
+ clearFootGroundPreview();
+ measuredFootGround = null;
  renderGroundResult($(prefix + 'result'), new Set());
- $(prefix + 'lidar-fields').hidden = !usesLidarRadius(kind);
- $(prefix + 'origin-hint').hidden = !kind.startsWith('lidar-origin-');
+ $(prefix + 'lidar-fields').hidden = kind !== 'lidar';
+ $(prefix + 'origin-hint').hidden = kind !== 'lidar-origin';
+ $(prefix + 'scene-hint').hidden = kind !== 'scene';
+ $(prefix + 'foot-fields').hidden = !foot;
  if (fullControl) {
-  $(prefix + 'scope').disabled = !kind.endsWith('-range');
+  $(prefix + 'scope').disabled = fc.objectType === 'shape';
   $(prefix + 'anchor-field').hidden = !anchor;
   setField(prefix + 'anchor-ids', getExplicitAnchorIds().join(', '));
+  $('cqt-fc-ground').hidden = cloudPreview;
+  $('cqt-fc-ground-measure').hidden = cloudPreview;
+  $('cqt-fc-ground-preview').hidden = !cloudPreview;
+  fcRerenderVisible('3d');
  } else {
+  $('cqt-btn-ground-fit').hidden = cloudPreview;
+  $('cqt-btn-ground-preview').hidden = !cloudPreview;
   $(prefix + 'anchor-hint').hidden = !anchor;
   if (anchor) $('cqt-ground-anchor-controls').open = true;
  }
+ refreshGroundScanRing();
 }
 
-async function getGroundFitFrames(kind, targetId, fullControl, row) {
+function fcGroundFrames(range) {
+ const present = fc.allRows.filter((row) => !row.outside);
+ if (fc.objectType === 'shape' || range === 'track') return present.map((row) => row.frame);
+ if (range === 'selected' || range === 'keyframes') {
+  return fcSelectedRows().filter((row) => range !== 'keyframes' || row.key).map((row) => row.frame);
+ }
+ const activeFrame = fcLayout() === 'table' ? fc.lastClicked : fc.focusFrame;
+ const current = [activeFrame, getFrame(), fcSelectedRows()[0]?.frame, present[0]?.frame]
+  .find((frame) => present.some((row) => row.frame === frame));
+ if (!Number.isInteger(current)) return [];
+ return range === 'current_to_end' ? present.filter((row) => row.frame >= current).map((row) => row.frame) : [current];
+}
+
+async function getGroundFitFrames(scopeName, targetId, fullControl, row) {
  if (row) return [row.frame];
- if (fullControl) {
-  const rows = val('cqt-fc-ground-scope') === 'track' ? fc.allRows.filter((r) => !r.outside) : fcSelectedRows();
-  if (kind.endsWith('-range')) return rows.map((r) => r.frame);
-  const candidates = [fcLayout() === 'focus' ? fc.focusFrame : fc.lastClicked, getFrame(), fcSelectedRows()[0]?.frame];
-  const current = candidates.find((frame) => {
-   const candidate = fcRowByFrame(frame);
-   return candidate && !candidate.outside;
-  });
-  return Number.isInteger(current) ? [current] : [];
- }
- if (kind.endsWith('-frame')) {
-  const frame = getFrame();
-  return Number.isInteger(frame) ? [frame] : [];
- }
+ if (fullControl) return fcGroundFrames(scopeName);
  const range = await resolveGroundRange(targetId);
  const bounds = jobBounds();
  if (!range || !bounds) return null;
@@ -2147,15 +2639,27 @@ async function getGroundFitFrames(kind, targetId, fullControl, row) {
  return frames;
 }
 
+async function getGroundFitStates(ids, frame, keyframesOnly, fullControl) {
+ const states = await getStates(frame);
+ return ids.map((id) => states.find((state) => state.clientID === id) ||
+  (!fullControl && states.find((state) => state.serverID === id)))
+  .filter((state) => isCuboid(state) && !state.outside && (!keyframesOnly || isKey(state)));
+}
+
 async function runGroundFit(kind, { fullControl = false, row = null, measure = false } = {}) {
  if (groundFitting || isToolBusy() || fc.busy || fc.harvesting) return fail('Đang xử lý thao tác trước, thử lại khi hoàn tất.');
  if (!Object.hasOwn(GROUND_FIT_CHOICES, kind)) return;
  const job = getJob();
- const anchor = kind === 'anchor-range';
- const lidarOrigin = kind.startsWith('lidar-origin-');
+ const anchor = kind === 'anchor';
+ const foot = usesFootGround(kind);
+ const scene = kind === 'scene';
+ const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
+ const radius = foot ? footGroundRadius(prefix) : null;
+ if (Number.isNaN(radius)) return fail(`Nhập bán kính từ ${FOOT_GROUND_MIN_RADIUS} đến ${FOOT_GROUND_MAX_RADIUS} m, hoặc để trống để tự động.`);
+ const lidarOrigin = kind === 'lidar-origin';
  const needsCloud = !anchor && !lidarOrigin;
- const lidar = usesLidarRadius(kind) ? lidarGroundOptions() : null;
- if (usesLidarRadius(kind) && !lidar) return;
+ const lidar = kind === 'lidar' ? lidarGroundOptions() : null;
+ if (kind === 'lidar' && !lidar) return;
  const refIds = anchor ? getExplicitAnchorIds() : [];
  if (anchor && !refIds.length) return fail('Nhập ít nhất một Anchor ID trong phần tuỳ chỉnh.');
  const missingSource = anchor ? `Anchor ${refIds.map((id) => '#' + id).join(' → ')}` :
@@ -2164,7 +2668,6 @@ async function runGroundFit(kind, { fullControl = false, row = null, measure = f
   .filter((id) => !refIds.includes(id));
  if (!targetIds.length) return fail(anchor ? 'Chọn cuboid mục tiêu khác với Anchor.' : 'Chọn cuboid mục tiêu.');
 
- const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
  const mode = val(prefix + 'mode') || 'snap';
  const direction = val(prefix + 'direction') || 'both';
  const label = GROUND_FIT_CHOICES[kind];
@@ -2172,21 +2675,23 @@ async function runGroundFit(kind, { fullControl = false, row = null, measure = f
  const missing = new Set();
  const measurements = [];
  const report = $(prefix + 'result');
- const keyframesOnly = !fullControl && kind.endsWith('-range') && val('cqt-ground-scope') === 'keyframes';
+ const range = val(prefix + 'scope');
+ const keyframesOnly = range === 'keyframes';
  let scanned = 0;
  let fitStates = 0;
  let skippedDirection = 0;
  let protectedCount = 0;
  let result;
+ let lastAdjustment = '';
  let previousCloud = null;
  let movedForFit = false;
  groundFitting = true;
  try {
-  const frames = await getGroundFitFrames(kind, targetIds[0], fullControl, row);
+  const frames = await getGroundFitFrames(range, targetIds[0], fullControl, row);
   if (!frames) return;
   if (!frames.length) return fail('Chọn frame có cuboid cần xử lý.');
   if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) return;
-  if (needsCloud && !safeData() && frames.length > 30 &&
+  if (needsCloud && !foot && !scene && !safeData() && frames.length > 30 &&
       !confirm(`${measure ? 'Đo đáy theo' : 'Fit'} ${label} trên ${frames.length} frame. CVAT có thể tự chuyển frame để nạp point cloud. Tiếp tục?`)) return;
 
   renderGroundResult(report, missing);
@@ -2194,13 +2699,9 @@ async function runGroundFit(kind, { fullControl = false, row = null, measure = f
   try {
    for (const frame of frames) {
     if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) break;
-    const states = [];
-    for (const id of targetIds) {
-     const state = await getState(id, frame);
-     if (!isCuboid(state) || state.outside || (keyframesOnly && !isKey(state))) continue;
-     if (batch && (state.lock || state.isGroundTruth)) { protectedCount++; continue; }
-     states.push(state);
-    }
+    const candidates = await getGroundFitStates(targetIds, frame, keyframesOnly, fullControl);
+    const states = batch ? candidates.filter((state) => !state.lock && !state.isGroundTruth) : candidates;
+    protectedCount += candidates.length - states.length;
     if (!states.length) continue;
     scanned++;
     if (frames.length > 1) setStatus(`Đang ${measure ? 'đo đáy theo' : 'fit'} ${label} · F${frame} / F${frames.at(-1)}`, '', { silentToast: true });
@@ -2217,11 +2718,12 @@ async function runGroundFit(kind, { fullControl = false, row = null, measure = f
      }
     } else if (lidarOrigin) {
      framePlane = await lidarOriginPlaneAtFrame(job, frame);
+    } else if (foot || scene) {
+     positions = await footGroundCloud(frame);
+     if (scene) framePlane = estimateSceneGround(positions);
     } else {
-     const cached = fullControl && fcRowByFrame(frame);
      if (getFrame() === frame) positions = await cloudAtFrame(frame, null);
      positions ||= fullSceneCache.get(sceneKey(frame));
-     if (!positions && !lidar && cached) positions = fcCloud(cached);
      if (!positions && getFrame() !== frame && !safeData()) {
       movedForFit = true;
       positions = await cloudAtFrame(frame, previousCloud);
@@ -2231,8 +2733,11 @@ async function runGroundFit(kind, { fullControl = false, row = null, measure = f
     }
     if (getJob() !== job || (fullControl && (!fc.open || fc.targetId !== targetIds[0]))) break;
     for (const state of states) {
-     const plane = framePlane || (needsCloud && !lidar && positions && estimateGroundPlane(state.points, positions));
+     const plane = framePlane || (foot && estimateFootGround(positions, footGroundRegion(state.points, radius)));
      if (!plane) { missing.add(frame); continue; }
+     if (foot && frame === getFrame() && state.clientID === resolveTargetId()) {
+      measuredFootGround = { frame, id: state.clientID, radius, plane, points: [...state.points] };
+     }
      if (measure) {
       const scale = lidarOrigin ? Math.hypot(plane.a, plane.b, 1) : 1;
       measurements.push({ frame, id: state.clientID, gap: groundGap(state.points, plane) / scale });
@@ -2254,7 +2759,15 @@ async function runGroundFit(kind, { fullControl = false, row = null, measure = f
       }
       const rotated = Math.abs(after[3] - st.points[3]) > 1e-6 || Math.abs(after[4] - st.points[4]) > 1e-6;
       if (Math.abs(dz) < 1e-4 && !rotated) return false;
+      lastAdjustment = ` · ΔZ ${fmtSigned(dz, 3)} m`;
+      if (mode === 'tilt') {
+       const { pitch, roll } = fcGetPitchRoll(after);
+       lastAdjustment += ` · Pitch ${fmtSigned(pitch * DEG, 1)}° · Roll ${fmtSigned(roll * DEG, 1)}°`;
+      }
       st.points = after;
+      if (measuredFootGround?.frame === frame && measuredFootGround.id === st.clientID && measuredFootGround.plane === plane) {
+       measuredFootGround.points = after;
+      }
       return true;
      });
     }
@@ -2269,6 +2782,7 @@ async function runGroundFit(kind, { fullControl = false, row = null, measure = f
    }
   }
   if (getJob() !== job) return;
+  refreshGroundScanRing();
   if (measure) {
    if (!scanned) return fail('Không có cuboid hiện trên các frame trong phạm vi đo.');
    const count = measurements.length;
@@ -2292,7 +2806,8 @@ async function runGroundFit(kind, { fullControl = false, row = null, measure = f
   const missingText = missing.size ? ` Bỏ qua ${missing.size} frame thiếu ${missingSource} (${gaps.slice(0, 12).join(', ')}${gaps.length > 12 ? ', …' : ''}).` : '';
   const protectedText = protectedCount ? ` Bỏ qua ${protectedCount} cuboid đã khoá hoặc ground truth.` : '';
   const directionText = skippedDirection ? ` Bỏ qua ${skippedDirection} lượt theo hướng đã chọn.` : '';
-  const message = result.changed ? `Đã fit ${result.changed} lượt.` : fitStates ? 'Cuboid không cần thay đổi theo tuỳ chọn hiện tại.' : 'Chưa fit được cuboid.';
+  const message = result.changed ? `Đã fit ${result.changed} lượt${result.changed === 1 && !result.errors ? lastAdjustment : ''}.`
+   : fitStates ? 'Cuboid không cần thay đổi theo tuỳ chọn hiện tại.' : 'Chưa fit được cuboid.';
   setStatus(label + ' · ' + message + missingText + protectedText + directionText +
    (needsCloud && safeData() && missing.size ? ' Bật Tự nạp Cloud nếu cần quét frame chưa có dữ liệu.' : '') +
    editSuffix(result), missing.size || protectedCount || result.errors || !result.restored ? 'warn' : 'success');
@@ -2306,7 +2821,7 @@ async function applyGroundFit() {
  if (!range) return;
  const plane = await ensureGroundPlane();
  if (!plane) return;
- const r = groundRange(range);
+ const r = await resolveGroundRange(range.targetId);
  if (!r) return fail('Không đọc được frame hiện tại.');
 
  const mode = val('cqt-ground-mode') || 'snap';
@@ -2316,7 +2831,8 @@ async function applyGroundFit() {
  let minDz = Infinity, maxDz = -Infinity;
 
  const res = await editRange('Fit mặt đất', {
-  targetId: range.targetId, startFrame: r.from, endFrame: r.to, keyframesOnly,
+  targetId: range.targetId, startFrame: Math.max(r.from, jobBounds()?.start ?? r.from),
+  endFrame: Math.min(r.to, jobBounds()?.stop ?? r.to), keyframesOnly,
  }, (s, f) => {
   const pl = planeForFrame(f, s.points);
   if (!pl) { noPlane++; return false; }
@@ -2790,16 +3306,16 @@ async function fetchLWH(id, frame = getFrame()) {
  const lim = getLimitsForLabel(label);
  const out = lim ? limitViolations(l, w, h, lim) : [];
  setStatus(
-  `✅ Đã chốt LWH #${id} [${label}] @f${frame}: ${fmtLWH(l, w, h)} — bấm ${OPTION_KEY}S để đồng bộ track` +
+  `✅ Đã chốt LWH #${id} [${label}] @f${frame}: ${fmtLWH(l, w, h)} — bấm ${LWH_SYNC_SHORTCUT} để đồng bộ track` +
   (out.length ? ` ⚠️ Ngoài limits: ${out.join('; ')}.` : (lim ? ' (trong limits).' : '.')),
   out.length ? 'warn' : 'success'
  );
 }
 
 // Kẹp LWH theo limits của class nếu bật "Ép theo limits" (mặc định tắt: limits chỉ cảnh báo)
-async function clampLWHInputs(id, lwh) {
+async function clampLWHInputs(id, lwh, frame = getFrame()) {
  if (!isChecked('cqt-limit-clamp-on-apply')) return { ...lwh, note: '' };
- const s = await getState(id, getFrame());
+ const s = await getState(id, frame);
  const lim = getLimitsForLabel(labelName(s));
  if (!lim) return { ...lwh, note: '' };
  const c = clampLWH(lwh.l, lwh.w, lwh.h, lim);
@@ -2809,18 +3325,18 @@ async function clampLWHInputs(id, lwh) {
 }
 
 // scope: 'range' (dải Start–End) | 'track' (mọi keyframe của track) | 'frame' (chỉ frame hiện tại)
-async function applyLWH(scope) {
- if (!targetLocked && activeId() !== null && readObjectId($('cqt-target-id')) !== activeId()) {
+async function applyLWH(scope, { id: explicitId, frame = getFrame() } = {}) {
+ if (!explicitId && !targetLocked && activeId() !== null && readObjectId($('cqt-target-id')) !== activeId()) {
   setField('cqt-target-id', activeId());
   lastSyncedObjId = activeId();
  }
- const id = requireTarget();
+ const id = explicitId ?? requireTarget();
  if (id === null) return;
  let input = readLWHInputs();
  // Nếu chưa chủ động chốt LWH (chưa bấm ⌥C / gõ tay / nạp preset) mà vừa kéo đổi size box trên màn hình,
  // tự lấy luôn LWH thực tế của box tại frame hiện tại để không bao giờ áp nhầm kích thước cũ lúc mới click xe
  if (!input || (!lwhPinned && scope !== 'frame')) {
-  const sNow = await getState(id, getFrame());
+  const sNow = await getState(id, frame);
   if (isCuboid(sNow) && !sNow.outside) {
    const [, , , , , , lNow, wNow, hNow] = sNow.points;
    if (!input || !sameLWH([0, 0, 0, 0, 0, 0, input.l, input.w, input.h], lNow, wNow, hNow, 1e-4)) {
@@ -2830,7 +3346,7 @@ async function applyLWH(scope) {
   }
  }
  if (!input) {
-  await fetchLWH(id, getFrame());
+  await fetchLWH(id, frame);
   input = readLWHInputs();
  }
  if (!input) return fail('Nhập đủ L, W, H dương!');
@@ -2851,7 +3367,7 @@ async function applyLWH(scope) {
   opts = { ...range, keyframesOnly: isChecked('cqt-lwh-keyframe-only') };
  }
 
- const { l, w, h, note } = await clampLWHInputs(id, input);
+ const { l, w, h, note } = await clampLWHInputs(id, input, frame);
  const keepGround = isChecked('cqt-keep-ground');
  const anchorMode = getSettings().anchorResize ? (val('cqt-lwh-anchor') || 'center') : 'center';
  const anchorLabels = {
@@ -2863,10 +3379,11 @@ async function applyLWH(scope) {
   right: 'giữ sườn phải',
  };
  const res = await editRange('LWH', opts, (s) => {
-  if (sameLWH(s.points, l, w, h, 1e-9)) return false;
+  if (s.lock || s.isGroundTruth || sameLWH(s.points, l, w, h, 1e-9)) return false;
   s.points = withLWH(s.points, l, w, h, keepGround, anchorMode);
   return true;
  });
+ if (res.changed && explicitId && fc.open && !fc.toolsOpen && fc.targetId === id) await fcReloadStates();
 
  if (!res.changed) {
   return setStatus(res.seen ? `#${id} đã có LWH ${fmtLWH(l, w, h)} trong phạm vi này.` : `Không thấy #${id} trong phạm vi.`, res.seen ? 'success' : 'error');
@@ -5270,10 +5787,9 @@ function cloudPrint(pos) {
 async function cloudAtFrame(f, prev) {
  const playerReady = () => {
   const fr = annotationState()?.player?.frame;
-  return getFrame() === f && !fr?.fetching;
+  return getFrame() === f && !fr?.fetching && loadedCloudFrame() === f;
  };
  if (getFrame() === f) {
-  if (prev) return prev;
   for (let t = 0; t < 50 && !playerReady(); t++) await sleep(100);
   return playerReady() ? getPointCloudPositions() : null;
  }
@@ -6949,6 +7465,13 @@ function markShortcut(e, prefix = KEY_PREFIX) {
 
 const TRANSFORM_KEYS = { KeyG: 'G', KeyW: 'R', KeyS: 'S' };
 const NUMPAD_VIEWS = { Numpad7: 'top', Numpad1: 'front', Numpad3: 'side', NumpadDecimal: 'focus' };
+function lwhShortcutTarget() {
+ if (!fc.open || fc.toolsOpen || !Number.isInteger(fc.targetId)) return null;
+ const row = fcRowAtPoint(lastMouse.x, lastMouse.y);
+ const frame = row && !row.outside ? row.frame : fcGroundFrames('current')[0];
+ return { id: fc.targetId, frame };
+}
+
 const SHORTCUT_ACTIONS = {
  KeyQ: (e) => (e.shiftKey ? toggleStealthUI() : (fc.open ? fcToggleTools() : togglePanel())),
  Backslash: () => toggleStealthUI(),
@@ -6959,11 +7482,14 @@ const SHORTCUT_ACTIONS = {
  KeyA: () => autoDetectAndSpan(),
  KeyB: (e) => (e.shiftKey ? clearAllAnchors() : toggleAnchorUnderPointer()),
  KeyP: (e) => smartSnap(selectedOrTarget(), e.shiftKey ? true : undefined),
- KeyH: (e) => runGroundFitShortcut(e.shiftKey ? 'cloud-range' : 'cloud-frame'),
- KeyL: (e) => runGroundFitShortcut(e.shiftKey ? 'lidar-range' : 'lidar-frame'),
- KeyE: () => runGroundFitShortcut('anchor-range'),
- KeyC: () => fetchLWH(),
- KeyD: (e) => applyLWH(e.shiftKey ? 'range' : 'track'),
+ KeyH: (e) => runGroundFitShortcut('cloud', e.shiftKey ? 'selected' : 'current'),
+ KeyL: (e) => runGroundFitShortcut('lidar', e.shiftKey ? 'selected' : 'current'),
+ KeyE: () => runGroundFitShortcut('anchor', 'selected'),
+ KeyC: () => {
+  const target = lwhShortcutTarget();
+  return target ? fetchLWH(target.id, target.frame) : fetchLWH();
+ },
+ KeyD: (e) => e.shiftKey ? applyLWH('range') : applyLWH('track', lwhShortcutTarget() ?? undefined),
  KeyR: (e) => (e.shiftKey ? alignYawCurrentFrame() : rotateTrack(180)),
  KeyI: (e) => (e.shiftKey ? reinterpolateRange() : smoothTrack()),
  Comma: () => stepObjectKeyframe('prev'),
@@ -6991,8 +7517,10 @@ const DIRECT_OPTION_ACTIONS = {
  KeyB: SHORTCUT_ACTIONS.KeyB,
  KeyP: SHORTCUT_ACTIONS.KeyP,
  KeyH: SHORTCUT_ACTIONS.KeyH,
- KeyG: SHORTCUT_ACTIONS.KeyL,
+ KeyG: (e) => e.shiftKey ? SHORTCUT_ACTIONS.KeyL(e) : openGroundShortcut(),
  KeyC: SHORTCUT_ACTIONS.KeyC,
+ // Chrome on Windows/Linux uses Alt+D to focus the address bar.
+ KeyD: IS_MAC ? SHORTCUT_ACTIONS.KeyD : null,
  KeyS: SHORTCUT_ACTIONS.KeyD,
  KeyR: SHORTCUT_ACTIONS.KeyR,
  KeyX: SHORTCUT_ACTIONS.KeyX,
@@ -7000,17 +7528,113 @@ const DIRECT_OPTION_ACTIONS = {
  KeyY: SHORTCUT_ACTIONS.KeyE,
 };
 const DIRECT_OPTION_SHIFT = new Set(['KeyB', 'KeyP', 'KeyH', 'KeyG', 'KeyS', 'KeyR', 'KeyX', 'KeyZ']);
-function runGroundFitShortcut(kind) {
- const fullControl = fc.open && !fc.toolsOpen;
- const field = fullControl ? 'cqt-fc-ground-kind' : 'cqt-ground-kind';
- setField(field, kind);
+function runGroundFitShortcut(kind, range) {
+ return selectGroundShortcutOptions(kind, range, fc.open && !fc.toolsOpen);
+}
+
+function selectGroundShortcutOptions(kind, range, fullControl) {
+ const prefix = fullControl ? 'cqt-fc-ground-' : 'cqt-ground-';
+ setField(prefix + 'kind', kind);
+ setField(prefix + 'scope', range);
  syncGroundFitControls(fullControl);
  if (fullControl) {
   fcSetToolbar(true);
-  $('cqt-fc-ground-controls').open = true;
-  fcQueueToolbarCollapse();
+  fcSelectToolbarTab('ground', true);
+ } else {
+  panelApi?.setState('pinned');
+  openToolboxTab('ground');
  }
- return runGroundFit(kind, { fullControl });
+ return groundUsesPreview(kind) ? previewFootGround(fullControl, true) : runGroundFit(kind, { fullControl });
+}
+
+let groundShortcut = null;
+
+function renderGroundShortcut() {
+ const menu = $('cqt-ground-shortcut');
+ const { fullControl, shape, kind } = groundShortcut;
+ const choices = kind ? (shape ? { current: 'Frame hiện tại' } : groundScopeChoices(fullControl)) : GROUND_FIT_CHOICES;
+ menu.innerHTML = `<div id="cqt-ground-shortcut-title" class="cqt-h">${kind
+  ? `Fit Ground · ${GROUND_FIT_CHOICES[kind]} · Chọn phạm vi` : 'Fit Ground · Chọn nguồn'}</div>
+  <div class="cqt-ground-shortcut-options">${Object.entries(choices).map(([value, label], index) =>
+   `<button type="button" class="cqt-btn cqt-btn-secondary" data-ground-shortcut-choice="${value}">
+    <kbd class="cqt-kbd">${index + 1}</kbd><span>${label}</span></button>`).join('')}</div>
+  <div class="cqt-hint">${kind ? 'Backspace về nguồn · ' : ''}Esc để hủy</div>`;
+ menu.hidden = false;
+ menu.querySelector('button').focus({ preventScroll: true });
+}
+
+function openGroundShortcut() {
+ const fullControl = fc.open && !fc.toolsOpen;
+ const ids = fullControl ? [fc.targetId].filter(Number.isInteger) : selectedOrTarget();
+ if (!ids.length) return fail('Chọn cuboid mục tiêu trước khi Fit Ground.');
+ const states = annotationState()?.annotations?.states ?? [];
+ const shape = fullControl ? fc.objectType === 'shape' : ids.length === 1 &&
+  states.some((state) => state.clientID === ids[0] && state.objectType === 'shape');
+ let menu = $('cqt-ground-shortcut');
+ if (!menu) {
+  menu = document.createElement('section');
+  menu.id = 'cqt-ground-shortcut';
+  menu.setAttribute('role', 'group');
+  menu.setAttribute('aria-labelledby', 'cqt-ground-shortcut-title');
+  menu.addEventListener('click', guarded((e) => {
+   const button = e.target.closest('button[data-ground-shortcut-choice]');
+   if (button && groundShortcut) return chooseGroundShortcut(button.dataset.groundShortcutChoice);
+  }));
+  root.appendChild(menu);
+ }
+ groundShortcut = { fullControl, shape, kind: null, ids, loadRequest: fc.loadRequest, frame: getFrame(), focus: document.activeElement };
+ renderGroundShortcut();
+}
+
+function closeGroundShortcut() {
+ const { focus } = groundShortcut;
+ groundShortcut = null;
+ $('cqt-ground-shortcut').hidden = true;
+ focus?.focus({ preventScroll: true });
+}
+
+async function chooseGroundShortcut(choice) {
+ const { fullControl, kind, ids, loadRequest, frame } = groundShortcut;
+ if (!kind) {
+  groundShortcut.kind = choice;
+  renderGroundShortcut();
+  return;
+ }
+ closeGroundShortcut();
+ const unchanged = fullControl
+  ? fc.open && !fc.toolsOpen && fc.targetId === ids[0] && fc.loadRequest === loadRequest
+  : getFrame() === frame && selectedOrTarget().join(',') === ids.join(',');
+ if (!unchanged) return fail('Object hoặc frame đã đổi. Mở lại phím tắt Fit Ground.');
+ return selectGroundShortcutOptions(kind, choice, fullControl);
+}
+
+function handleGroundShortcutKey(e) {
+ if (!groundShortcut) return false;
+ if (e.ctrlKey || e.metaKey || e.altKey) {
+  if (!['Control', 'Meta', 'Alt', 'Shift'].includes(e.key)) closeGroundShortcut();
+  return false;
+ }
+ const digit = /^(?:Digit|Numpad)([1-5])$/.exec(e.code);
+ if (digit && !e.shiftKey) {
+  swallow(e);
+  const button = $('cqt-ground-shortcut').querySelectorAll('button')[Number(digit[1]) - 1];
+  if (!e.repeat && button) void guarded(chooseGroundShortcut)(button.dataset.groundShortcutChoice);
+  return true;
+ }
+ if (e.key === 'Escape') {
+  swallow(e);
+  closeGroundShortcut();
+  return true;
+ }
+ if (e.key === 'Backspace' && groundShortcut.kind) {
+  swallow(e);
+  if (!e.repeat) {
+   groundShortcut.kind = null;
+   renderGroundShortcut();
+  }
+  return true;
+ }
+ return false;
 }
 
 let shortcutUntil = 0;
@@ -7031,6 +7655,24 @@ function onKeyDown(e) {
    return handleTransformKey(e);
   }
   return;
+ }
+ if (handleGroundShortcutKey(e)) return;
+ if (!isTyping(e) && !e.altKey && !e.ctrlKey && !e.metaKey &&
+     !$('cqt-modal') && !$('cqt-qc-workspace') && ['Escape', 'Enter'].includes(e.key)) {
+  const preview = footGroundPreview;
+  const applyButton = preview && $(preview.fullControl ? 'cqt-fc-ground-apply' : 'cqt-btn-ground-apply');
+  if (e.key === 'Escape' && (preview || groundPreviewComputing)) {
+   swallow(e);
+   clearFootGroundPreview();
+   setStatus('Đã hủy xem trước Fit Ground.', 'info');
+   return;
+  }
+  if (e.key === 'Enter' && !e.shiftKey && (e.target === applyButton || !e.target.closest?.('button')) &&
+      applyButton && !applyButton.hidden && applyButton.getClientRects().length) {
+   swallow(e);
+   if (!e.repeat) void guarded(applyFootGroundPreview)(preview.fullControl);
+   return;
+  }
  }
  if (['Enter', ' '].includes(e.key) &&
      ['cqt-sidebar-rail', 'cqt-fc-toolbar-toggle', 'cqt-fc-toolbar-pin'].includes(e.target?.id)) {
@@ -7073,7 +7715,7 @@ function onKeyDown(e) {
   return;
  }
  const armed = Date.now() <= shortcutUntil;
- if (optionOnly && !(armed && TRANSFORM_KEYS[e.code])) {
+ if (optionOnly && !(armed && TRANSFORM_KEYS[e.code] && e.code !== 'KeyG')) {
   const action = !e.shiftKey || DIRECT_OPTION_SHIFT.has(e.code) ? DIRECT_OPTION_ACTIONS[e.code] : null;
   const nativeKey = ['alt', e.code.slice(3).toLowerCase(), ...(e.shiftKey ? ['shift'] : [])].sort().join('+');
   shortcutUntil = 0;
@@ -7089,6 +7731,20 @@ function onKeyDown(e) {
  shortcutUntil = 0;
  if (e.repeat || e.ctrlKey || e.metaKey) return;
 
+ if (!armed && fc.open && !fc.toolsOpen && !fc.drag && !groundShortcut && !e.altKey &&
+     !$('cqt-modal') && !$('cqt-qc-workspace')) {
+  const layout = !e.shiftKey && FC_LAYOUT_KEYS[e.code];
+  if (layout) {
+   swallow(e);
+   fcSetLayout(layout);
+   return;
+  }
+  if (e.key === '+' || e.key === '-') {
+   swallow(e);
+   fcSetPointSize(fc.cfg.pointSize + (e.key === '+' ? 1 : -1), true);
+   return;
+  }
+ }
  const transform = TRANSFORM_KEYS[e.code];
  const direct = !e.altKey && !e.shiftKey;
  const mode = annotationState()?.canvas?.instance?.mode?.();
@@ -7114,6 +7770,7 @@ function installGlobalHandlers() {
  listen(window, 'keydown', onKeyDown, true);
  listen(window, 'blur', () => {
   shortcutUntil = 0;
+  if (groundShortcut) closeGroundShortcut();
   transformRequest++;
   if (xf.active) cancelTransform();
  });
@@ -7126,6 +7783,7 @@ function installGlobalHandlers() {
   if (getExplicitAnchorIds().length > 0 && !stealthUI && !fc.open) renderAnchorOverlay();
  }, { passive: true });
  listen(window, 'pointerdown', (e) => {
+  if (groundShortcut && !e.target.closest?.('#cqt-ground-shortcut')) closeGroundShortcut();
   if (!xf.active) return;
   swallow(e);
   // macOS biến Ctrl + Click trái thành button 2 (chuột phải) => vẫn coi là xác nhận
@@ -7193,10 +7851,12 @@ const FC_MIN_H = 420;
 const FC_HIT_PX = 8;
 const FC_YAW_HANDLE_PX = 14;
 const FC_VIEWS = ['top', 'side', 'front', '3d'];
+const FC_LAYOUT_KEYS = { Digit1: 'table', Digit2: 'focus', Digit3: 'stacked' };
+const FC_MAX_POINT_SIZE = 6;
 const FC_DEFAULTS = {
  maximized: true, x: 60, y: 50, w: 1280, h: 760,
  toolbarPinned: false,
- rowH: 155, zoom: 1, filter: 'all', fillMode: 'lwh', anchor: 'center',
+ rowH: 155, zoom: 1, pointSize: 1, filter: 'all', fillMode: 'lwh', anchor: 'center',
  slice: 'tight', show3d: true, scene3d: true, fullSceneDetail: true, zoom3d: 1,
  live3d: false, liveSplitMode: 'bottom', liveSplitY: 0, liveSplitX: 0,
  camAz: -0.68, camEl: 0.46, camPan: [0, 0, 0], nav3dMode: 'orbit',
@@ -7243,6 +7903,7 @@ const pointCropCache = new Map(); // `${jobId}:${objectId}:${frame}` -> Float32A
 const sceneCropCache = new Map(); // `${jobId}:${frame}` -> Float32Array [x, y, z, ...] (đám mây điểm toàn cảnh 3D đã lọc LOD)
 const fullSceneCache = new Map();
 const FULL_SCENE_CACHE_LIMIT = 64 * 1024 * 1024;
+const FULL_TRACK_CACHE_LIMIT = 256 * 1024 * 1024;
 let fullSceneBytes = 0;
 let fullSceneRaster;
 const frameBoxesCache = new Map(); // `${jobId}:${frame}` -> Array<{ id, label, points }> (mọi cuboid trong frame)
@@ -7251,20 +7912,25 @@ const fc = {
  open: false,
  busy: false,
  el: null,
- cfg: { ...FC_DEFAULTS },
+ cfg: loadOpts(LS.fcBounds, FC_DEFAULTS),
  targetId: null,
+ objectType: null,
+ loadRequest: 0,
  allRows: [], // { frame, key, outside, base, draft, ground, el, visible, camAz, camEl }
  rowsByFrame: new Map(),
  rows: [], // hàng đang hiển thị
  filteredRows: [],
  layout: null,
  focusFrame: null,
+ focusStepping: false,
  healthStats: null,
  toolsOpen: false,
  toolbarTimer: 0,
  selected: new Set(), // frame
  lastClicked: null,
  harvesting: false,
+ detailTimer: 0,
+ detailLoading: null,
  abort: false,
  drag: null,
  hover: null,
@@ -7575,6 +8241,21 @@ function discardFullScene(key) {
  if (fullSceneRaster?.source === points) fullSceneRaster.source = null;
 }
 
+function trimFullSceneCache(incomingBytes = 0) {
+ const limit = fc.open && fc.allRows.length ? FULL_TRACK_CACHE_LIMIT : FULL_SCENE_CACHE_LIMIT;
+ if (fullSceneBytes + incomingBytes <= limit) return;
+ const activeTrack = fc.open ? fc.rowsByFrame : null;
+ for (const key of fullSceneCache.keys()) {
+  if (fullSceneBytes + incomingBytes <= limit) break;
+  const row = activeTrack?.get(Number(key.slice(key.lastIndexOf(':') + 1)));
+  if (!row || row.outside) discardFullScene(key);
+ }
+ for (const key of fullSceneCache.keys()) {
+  if (fullSceneBytes + incomingBytes <= limit) break;
+  discardFullScene(key);
+ }
+}
+
 function rememberFullScene(key, positions) {
  if (!fc.cfg.fullSceneDetail || !positions.length) return;
  if (fullSceneCache.get(key) === positions) {
@@ -7583,9 +8264,7 @@ function rememberFullScene(key, positions) {
   return;
  }
  discardFullScene(key);
- while (fullSceneCache.size && fullSceneBytes + positions.byteLength > FULL_SCENE_CACHE_LIMIT) {
-  discardFullScene(fullSceneCache.keys().next().value);
- }
+ trimFullSceneCache(positions.byteLength);
  fullSceneCache.set(key, positions);
  fullSceneBytes += positions.byteLength;
 }
@@ -7597,6 +8276,58 @@ function fcCacheFrameCloud(id, frame, basePoints, positions) {
  if (!sceneCropCache.has(key)) sceneCropCache.set(key, cropScenePoints(basePoints, positions));
  rememberFullScene(key, positions);
  return crop;
+}
+
+// Decode the requested PCD through CVAT's frame cache without changing the player frame.
+const fcCanReadCloud = typeof decodePointCloud === 'function' && typeof job.frames?.get === 'function';
+async function fcReadFrameCloud(frame) {
+ try {
+  const frameData = await job.frames.get(frame);
+  if (frameData.deleted || scope.signal.aborted) return null;
+  const { imageData } = await frameData.data();
+  if (!(imageData instanceof Blob) || scope.signal.aborted) return null;
+  return decodePointCloud(await imageData.arrayBuffer());
+ } catch (error) {
+  if (typeof error !== 'number') console.warn(LOG, `Không đọc được cloud của frame ${frame}:`, error);
+  return null;
+ }
+}
+
+function fcQueueVisibleDetail() {
+ if (!fcCanReadCloud || !fc.open || fc.harvesting || fc.detailLoading ||
+     !fc.cfg.fullSceneDetail || fcLayout() === 'table' || safeData()) return;
+ clearTimeout(fc.detailTimer);
+ fc.detailTimer = setTimeout(async () => {
+  if (!fc.open || fc.harvesting || fc.detailLoading || !fc.cfg.fullSceneDetail || fcLayout() === 'table' || safeData()) return;
+  const list = $('cqt-fc-list').getBoundingClientRect();
+  const center = (list.top + list.bottom) / 2;
+  const row = fc.rows.find((r) => {
+   if (!r.visible) return false;
+   const { top, bottom } = r.el.getBoundingClientRect();
+   return top <= center && bottom > center;
+  });
+  if (!row || row.outside || row.detailError || fullSceneCache.has(sceneKey(row.frame))) return;
+  row.detailPending = true;
+  fcSchedule([row]);
+  fc.detailLoading = (async () => {
+   const positions = await fcReadFrameCloud(row.frame);
+   if (!fc.open || fcRowByFrame(row.frame) !== row || !getJob() || safeData()) return;
+   if (positions) {
+    fcCacheFrameCloud(fc.targetId, row.frame, row.base, positions);
+    row.ground = undefined;
+   } else {
+    row.detailError = true;
+   }
+  })();
+  try {
+   await fc.detailLoading;
+  } finally {
+   fc.detailLoading = null;
+   row.detailPending = false;
+   if (fc.open && fcRowByFrame(row.frame) === row) fcSchedule([row]);
+   fcQueueVisibleDetail();
+  }
+ }, 80);
 }
 
 // Kiểm tra điểm (eu, ev, ew) trong hệ trục cục bộ của box có nằm trong hành lang độ sâu (Slice) của view không
@@ -7706,6 +8437,7 @@ function fcApplyFilter() {
  const start = intVal('cqt-frame-start'), end = intVal('cqt-frame-end');
  const hasRange = Number.isInteger(start) && Number.isInteger(end);
  fc.filteredRows = fc.allRows.filter((r) => {
+  if (fc.objectType === 'shape') return true;
   if (fc.cfg.filter === 'key') return r.key;
   if (fc.cfg.filter === 'range' && hasRange) return r.frame >= start && r.frame <= end;
   if (fc.cfg.filter === 'issue') return !!r.hasIssue;
@@ -7714,7 +8446,7 @@ function fcApplyFilter() {
  const focused = fc.filteredRows.find((row) => row.frame === fc.focusFrame) ||
   fc.filteredRows.find((row) => row.frame === (fc.lastClicked ?? getFrame())) || fc.filteredRows[0];
  fc.focusFrame = focused?.frame ?? null;
- fc.rows = fcLayout() === 'focus' && focused ? [focused] : fc.filteredRows;
+ fc.rows = fc.filteredRows;
 }
 
 function fcLayout() {
@@ -7726,14 +8458,29 @@ function fcShows3D() {
 }
 
 async function fcStepFocus(direction) {
+ if (fc.focusStepping) return;
  const idx = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
  const next = fc.filteredRows[idx + direction];
  if (!next) return;
- if (fc.toolsOpen && !(await goToFrame(next.frame))) return fail(`Không mở được frame ${next.frame}.`);
- fc.focusFrame = next.frame;
- fcRenderList();
- if (fc.toolsOpen) await jumpTo(fc.targetId, next.frame);
- if (fc.cfg.live3d) await fcSyncLiveCVAT(next.frame);
+ const id = fc.targetId;
+ fc.focusStepping = true;
+ try {
+  if (fc.toolsOpen && !(await goToFrame(next.frame))) return fail(`Không mở được frame ${next.frame}.`);
+  if (!fc.open || fc.targetId !== id || fcLayout() !== 'focus' || !fc.filteredRows.includes(next)) return;
+  fcScrollToFocus(next);
+  if (fc.toolsOpen) await jumpTo(id, next.frame);
+  if (fc.cfg.live3d) await fcSyncLiveCVAT(next.frame);
+ } finally {
+  fc.focusStepping = false;
+ }
+}
+
+function fcScrollToFocus(row) {
+ const list = $('cqt-fc-list');
+ if (!row?.el || !list) return;
+ fc.focusFrame = row.frame;
+ list.scrollTop += row.el.getBoundingClientRect().top - list.getBoundingClientRect().top;
+ fcUpdateFocusNav();
 }
 
 async function fcToggleTools() {
@@ -7742,7 +8489,7 @@ async function fcToggleTools() {
   root.classList.remove('cqt-fc-tools-open');
   panelApi?.setState(fc.previousSidebarState);
  } else {
-  if (!Number.isInteger(fc.targetId)) return fail('Nạp Track trước khi mở công cụ.');
+  if (!Number.isInteger(fc.targetId)) return fail('Nạp object trước khi mở công cụ.');
   const frame = fcLayout() === 'focus' ? fc.focusFrame : (fc.lastClicked ?? getFrame());
   if (Number.isInteger(frame) && !(await goToFrame(frame))) return fail(`Không mở được frame ${frame}.`);
   if (!fc.open) return;
@@ -7785,25 +8532,36 @@ function fcComputeExtent() {
  fc.extent = { l: pick(6, 4.5), w: pick(7, 1.9), h: pick(8, 1.6) };
 }
 
-async function fcLoadTrack(id = readObjectId($('cqt-fc-target'))) {
+async function fcLoadObject(id = readObjectId($('cqt-fc-target'))) {
+ if (fc.busy || groundFitting) return fail('Đang xử lý thao tác trước, thử lại khi hoàn tất.');
  if (id !== null && !isObjectId(id)) return fail(OBJECT_ID_ERROR);
  id ??= resolveTargetId();
  if (!isObjectId(id)) return fail('Nhập Object ID hoặc chọn 1 object trên canvas.');
  const b = jobBounds();
  if (!b) return fail('Không đọc được dải frame của job.');
+ const request = ++fc.loadRequest;
+ const isCurrent = () => fc.open && request === fc.loadRequest && !!getJob();
  if (fc.harvesting) {
   fc.abort = true;
   while (fc.harvesting) await sleep(50);
  }
- setStatus(`Full Control: đang đọc track #${id}...`, 'info');
- const list = await collectTrack(id, b.start, b.stop, { includeOutside: true });
+ if (!isCurrent()) return;
+ setStatus(`Full Control: đang đọc object #${id}...`, 'info');
+ const frame = getFrame();
+ const current = Number.isInteger(frame) ? await getState(id, frame, true) : null;
+ const list = isCuboid(current) && current.objectType === 'shape' ? [{ frame, state: current }]
+  : await collectTrack(id, b.start, b.stop, { includeOutside: true, clientIDOnly: true });
+ if (!isCurrent()) return;
  if (!list.length) return fail(`Không thấy object #${id} trong job.`);
  if (fc.toolsOpen && id !== fc.targetId) await fcToggleTools();
+ if (!isCurrent()) return;
  fc.targetId = id;
+ fc.objectType = list[0].state.objectType;
+ clearFootGroundPreview();
  setField('cqt-fc-target', id);
  fc.allRows = list.map(({ frame, state }) => ({
   frame,
-  key: isKey(state),
+  key: state.objectType === 'track' && !!state.keyframe,
   outside: !!state.outside,
   label: labelName(state),
   base: [...state.points],
@@ -7814,22 +8572,28 @@ async function fcLoadTrack(id = readObjectId($('cqt-fc-target'))) {
  }));
  fc.rowsByFrame = new Map(fc.allRows.map((row) => [row.frame, row]));
  fc.selected.clear();
- fc.lastClicked = null;
+ fc.lastClicked = fc.objectType === 'shape' ? list[0].frame : null;
+ if (fc.lastClicked !== null && !list[0].state.outside) fc.selected.add(fc.lastClicked);
  renderGroundResult($('cqt-fc-ground-result'), new Set());
- fc.focusFrame = getFrame();
+ fc.focusFrame = fc.lastClicked ?? getFrame();
  fcComputeExtent();
  fcRenderList();
+ fcUpdateSelectionUI();
+ const groundScope = $('cqt-fc-ground-scope');
+ if (fc.objectType === 'shape') groundScope.value = 'current';
+ groundScope.disabled = fc.objectType === 'shape';
+ refreshGroundScanRing();
  await fcHarvest(false);
 }
 
-// Quét point cloud cho các frame chưa có trong cache (phải chuyển frame vì CVAT chỉ giữ cloud frame đang xem)
+// Quét point cloud cho các frame chưa có trong cache.
 async function fcHarvest(force) {
  const id = fc.targetId;
  if (!Number.isInteger(id) || fc.harvesting) return;
  if (force && safeData()) {
   const ok = confirm(
    'Đang bật "Chế độ an toàn dữ liệu" (không tự chuyển frame).\n' +
-   'Bạn có muốn TẮT chế độ an toàn để tự động chuyển frame và quét Point Cloud cho toàn bộ các frame trong Track không?'
+   'Bạn có muốn TẮT chế độ an toàn để tự động nạp Point Cloud cho toàn bộ các frame trong Track không?'
   );
   if (!ok) return;
   setSafeData(false, { silent: true });
@@ -7841,13 +8605,13 @@ async function fcHarvest(force) {
    discardFullScene(sceneKey(r.frame));
    frameBoxesCache.delete(sceneKey(r.frame));
    r.ground = undefined;
+   r.detailError = false;
   }
  }
  const original = getFrame();
  const curRow = fc.allRows.find((r) => r.frame === original && !r.outside);
  const curPos = getPointCloudPositions();
- if (curRow && curPos && !annotationState()?.player?.frame?.fetching &&
-     (dock.cloudFrame === original || curPos !== dock.cloudRef)) {
+ if (curRow && curPos && loadedCloudFrame() === original) {
   fcCacheFrameCloud(id, curRow.frame, curRow.base, curPos);
   curRow.ground = undefined;
  }
@@ -7859,17 +8623,20 @@ async function fcHarvest(force) {
  }
  if (safeData()) {
   const cachedCount = fc.allRows.filter((r) => !r.outside && pointCropCache.has(cropKey(id, r.frame))).length;
-  fcProgress(cachedCount, Math.max(1, fc.allRows.length));
+  const present = fc.allRows.filter((r) => !r.outside).length;
+  fcProgress(cachedCount, present);
   fcRefreshAll();
   return setStatus(
-   `Full Control #${id}: Đang bật "An toàn dữ liệu" (có cloud ${cachedCount}/${fc.allRows.length} frame). ` +
+   `Full Control #${id}: Đang bật "An toàn dữ liệu" (có cloud ${cachedCount}/${present} frame). ` +
    'Bấm nút "An toàn: BẬT" trên thanh tiêu đề để chuyển sang "Tự nạp Cloud" cho mọi frame.',
    'info'
   );
  }
  // Ưu tiên nạp cloud cho: (1) Frame hiện tại -> (2) Các hàng đang hiển thị trên màn hình -> (3) Keyframe -> (4) Frame lân cận
- const todo = fc.allRows
-  .filter((r) => !r.outside && (!pointCropCache.has(cropKey(id, r.frame)) || !sceneCropCache.has(sceneKey(r.frame))))
+ const visibleTrack = fc.allRows.filter((row) => !row.outside);
+ const todo = visibleTrack
+  .filter((row) => !pointCropCache.has(cropKey(id, row.frame)) ||
+   !sceneCropCache.has(sceneKey(row.frame)) || (fc.cfg.fullSceneDetail && !fullSceneCache.has(sceneKey(row.frame))))
   .sort((a, b) =>
    (b.frame === original) - (a.frame === original) ||
    (b.visible ? 1 : 0) - (a.visible ? 1 : 0) ||
@@ -7877,25 +8644,21 @@ async function fcHarvest(force) {
    Math.abs(a.frame - (original ?? 0)) - Math.abs(b.frame - (original ?? 0)) ||
    a.frame - b.frame
   );
- if (!todo.length) {
-  fcProgress(1, 1);
-  fcRefreshAll();
-  return setStatus(`Full Control #${id}: ${fc.allRows.length} frame, cloud toàn cảnh & box đã có sẵn trong cache.`, 'success');
- }
-
  fc.harvesting = true;
  fc.abort = false;
  fcSetHarvestUI(true);
+ fcProgress(visibleTrack.length - todo.length, visibleTrack.length);
  let prev = getPointCloudPositions(); // luôn là cloud của frame đang hiển thị
  let done = 0, missing = 0;
  const busy = beginBusy('fc-harvest');
  try {
+  await fc.detailLoading;
   for (const row of todo) {
    if (fc.abort || !fc.open || safeData()) break;
-   const positions = await cloudAtFrame(row.frame, prev);
+   const positions = fcCanReadCloud ? await fcReadFrameCloud(row.frame) : await cloudAtFrame(row.frame, prev);
+   if (fc.abort || !fc.open || safeData()) break;
    if (positions) {
     fcCacheFrameCloud(id, row.frame, row.base, positions);
-    await captureFrameBoxes(row.frame);
     row.ground = undefined;
     prev = positions;
     fcSchedule([row]);
@@ -7905,21 +8668,27 @@ async function fcHarvest(force) {
     prev = getPointCloudPositions();
    }
    done++;
-   fcProgress(done, todo.length);
+   if (done < todo.length) fcProgress(visibleTrack.length - todo.length + done - missing, visibleTrack.length);
    setStatus(`Full Control: nạp cloud frame ${row.frame} (${done}/${todo.length})...`, 'info');
   }
  } finally {
   fc.harvesting = false;
   fcSetHarvestUI(false);
-  if (Number.isInteger(original) && getFrame() !== original) await goToFrame(original);
+  if (!fcCanReadCloud && Number.isInteger(original) && getFrame() !== original) await goToFrame(original);
   endBusy(busy);
  }
  fcRefreshAll();
+ if (!fc.abort) fcQueueVisibleDetail();
  const stopped = done < todo.length;
+ const ready = visibleTrack.filter((row) => fc.cfg.fullSceneDetail
+  ? fullSceneCache.has(sceneKey(row.frame)) : fcCloud(row)).length;
+ const detail = fc.cfg.fullSceneDetail ? 'đủ điểm' : 'bản xem trước';
+ fcProgress(ready, visibleTrack.length);
  setStatus(
-  `Full Control #${id}: ${stopped ? `đã dừng, nạp ${done}/${todo.length}` : `đã nạp cloud ${done}`} frame` +
-  (missing ? ` — ${missing} frame không đọc được cloud.` : '.'),
-  stopped || missing ? 'warn' : 'success'
+  `Full Control #${id}: ${stopped ? 'đã dừng · ' : ''}${ready}/${visibleTrack.length} frame có ${detail}.` +
+  (missing ? ` ${missing} frame không đọc được cloud.` : '') +
+  (!stopped && !missing && ready < visibleTrack.length ? ' Các frame còn lại sẽ tự nạp khi xem.' : ''),
+  stopped || missing || ready < visibleTrack.length ? 'warn' : 'success'
  );
 }
 
@@ -7927,7 +8696,7 @@ async function fcReloadStates() {
  const id = fc.targetId;
  if (!Number.isInteger(id)) return;
  for (const row of fc.allRows) {
-  const s = await getState(id, row.frame);
+  const s = await getState(id, row.frame, true);
   row.draft = null;
   if (!isCuboid(s)) {
    row.outside = true;
@@ -7935,12 +8704,13 @@ async function fcReloadStates() {
   }
   if (!fcSamePoints(row.base, s.points)) row.ground = undefined;
   row.base = [...s.points];
-  row.key = isKey(s);
+  row.key = s.objectType === 'track' && !!s.keyframe;
   row.outside = !!s.outside;
   row.label = labelName(s) || row.label;
   await captureFrameBoxes(row.frame);
  }
  fcComputeExtent();
+ clearFootGroundPreview();
  fcRefreshAll();
 }
 
@@ -7954,13 +8724,14 @@ function fcSetPoints(st, next) {
 async function fcApply(label, rows, mutate, { includeOutside = false } = {}) {
  const list = rows.filter((r) => r && (includeOutside || !r.outside));
  if (!list.length) return fail('Chưa có frame nào để áp dụng (chọn hàng trước).');
- if (fc.busy) return fail('Đang lưu thao tác trước, thử lại sau giây lát.');
+ if (fc.busy || groundFitting) return fail('Đang xử lý thao tác trước, thử lại khi hoàn tất.');
+ const id = fc.targetId;
  fc.busy = true;
  try {
   const batch = createBatch(`Full Control: ${label}`);
   for (const row of list) {
-   const s = await getState(fc.targetId, row.frame);
-   if (!isCuboid(s)) continue;
+   const s = await getState(id, row.frame, true);
+   if (!isCuboid(s) || s.lock || s.isGroundTruth) continue;
    await batch.edit(s, row.frame, (st) => mutate(st, row));
   }
   const res = await batch.finish();
@@ -7969,7 +8740,7 @@ async function fcApply(label, rows, mutate, { includeOutside = false } = {}) {
   if (!res.changed) {
    setStatus(`Full Control — ${label}: không có thay đổi.`, 'info');
   } else {
-   setStatus(`Full Control — ${label}: đã sửa ${res.changed} frame của #${fc.targetId}.` + editSuffix(res), res.errors ? 'warn' : 'success');
+   setStatus(`Full Control — ${label}: đã sửa ${res.changed} frame của #${id}.` + editSuffix(res), res.errors ? 'warn' : 'success');
   }
   return res;
  } finally {
@@ -8226,6 +8997,28 @@ function fcStrokePoly(ctx, pts, color, width, dash) {
  ctx.setLineDash([]);
 }
 
+// Draw in screen pixels, keeping selected cuboid points above context points.
+function cloudPointPainter(pixels, width, height, size, inside) {
+ if (size === 1) {
+  return (x, y, color, background = false) => {
+   const pixel = y * width + x;
+   if (background ? !pixels[pixel] : pixels[pixel] !== inside) pixels[pixel] = color;
+  };
+ }
+ const offset = Math.floor((size - 1) / 2);
+ return (x, y, color, background = false) => {
+  const left = x - offset, top = y - offset;
+  const endX = Math.min(width, left + size), endY = Math.min(height, top + size);
+  for (let row = Math.max(0, top); row < endY; row++) {
+   const start = row * width;
+   for (let col = Math.max(0, left); col < endX; col++) {
+    const pixel = start + col;
+    if (background ? !pixels[pixel] : pixels[pixel] !== inside) pixels[pixel] = color;
+   }
+  }
+ };
+}
+
 // Rasterize original points directly to screen pixels, including during camera and box drags.
 function fcDrawFullScene(ctx, g, pal, points, anchor, box, camera, plane) {
  const width = Math.ceil(g.cw), height = Math.ceil(g.ch);
@@ -8237,7 +9030,7 @@ function fcDrawFullScene(ctx, g, pal, points, anchor, box, camera, plane) {
  const colors = [pal.ptGround, pal.ptAround, pal.ptElevated, pal.ptInside];
  const signature = [width, height, g.cx, g.cy, g.k, ...anchor.slice(0, 6), ...box.slice(0, 9),
   camera.az, camera.el, camera.panU, camera.panV, camera.panW,
-  fc.cfg.scene3d, plane?.a, plane?.b, plane?.c, ...colors].join('|');
+  fc.cfg.scene3d, fc.cfg.pointSize, plane?.a, plane?.b, plane?.c, ...colors].join('|');
 
  if (layer.source !== points || layer.signature !== signature) {
   if (layer.width !== width || layer.height !== height) {
@@ -8259,6 +9052,7 @@ function fcDrawFullScene(ctx, g, pal, points, anchor, box, camera, plane) {
   const [road, body, high, inside] = layer.colors;
   const pixels = layer.pixels;
   pixels.fill(0);
+  const paint = cloudPointPainter(pixels, width, height, fc.cfg.pointSize, inside);
   const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
   const centerX = anchor[0] + camera.panU * ac - camera.panV * as;
   const centerY = anchor[1] + camera.panU * as + camera.panV * ac;
@@ -8281,18 +9075,15 @@ function fcDrawFullScene(ctx, g, pal, points, anchor, box, camera, plane) {
    const sx = Math.floor(g.cx + (-dx * sa + dy * ca) * scale);
    const sy = Math.floor(g.cy - (-forward * se + dz * ce) * scale);
    if (!(sx >= 0 && sx < width && sy >= 0 && sy < height)) continue;
-   const pixel = sy * width + sx;
-   if (pixels[pixel] === inside) continue;
-
    const bx = x - box[0], by = y - box[1], bz = z - box[2];
    if (Math.abs(bx) <= radius && Math.abs(by) <= radius && Math.abs(bz) <= radius &&
        Math.abs(r0[0] * bx + r1[0] * by + r2[0] * bz) <= hl &&
        Math.abs(r0[1] * bx + r1[1] * by + r2[1] * bz) <= hw &&
        Math.abs(r0[2] * bx + r1[2] * by + r2[2] * bz) <= hh) {
-    pixels[pixel] = inside;
+    paint(sx, sy, inside);
    } else {
     const heightAboveGround = z - (a * x + b * y + c);
-    pixels[pixel] = heightAboveGround < 0.16 ? road : heightAboveGround < 1.4 ? body : high;
+    paint(sx, sy, heightAboveGround < 0.16 ? road : heightAboveGround < 1.4 ? body : high);
    }
   }
   layer.ctx.putImageData(layer.image, 0, 0);
@@ -8354,7 +9145,7 @@ function fcRender3D(row, canvas, g, pal) {
   const rTight = cloud ? 0.5 * Math.hypot(row.base[6], row.base[7]) + 2.8 : 0;
   const rTight2 = rTight * rTight;
   const scGround = new Path2D(), scLow = new Path2D(), scHigh = new Path2D();
-  const szScene = g.k > 28 ? 1.5 : 1.15;
+  const szScene = fc.cfg.pointSize;
   const bz0 = bottomZ(anchor);
   for (let i = 0; i + 2 < sceneCloud.length; i += 3) {
    const x = sceneCloud[i], y = sceneCloud[i + 1], z = sceneCloud[i + 2];
@@ -8387,8 +9178,7 @@ function fcRender3D(row, canvas, g, pal) {
   const R = rotationMatrix(p[3], p[4], p[5]);
   const hl = Math.abs(p[6]) / 2, hw = Math.abs(p[7]) / 2, hh = Math.abs(p[8]) / 2;
   const inside = new Path2D(), aroundGround = new Path2D(), aroundBody = new Path2D(), aroundHigh = new Path2D();
-  const szTarget = g.k > 34 ? 2.2 : 1.7;
-  const szAround = g.k > 34 ? 1.8 : 1.35;
+  const sz = fc.cfg.pointSize;
   const bz0 = bottomZ(anchor);
   for (let i = 0; i + 2 < cloud.length; i += 3) {
    const x = cloud[i], y = cloud[i + 1], z = cloud[i + 2];
@@ -8403,16 +9193,16 @@ function fcRender3D(row, canvas, g, pal) {
    const sx = g.cx + h * g.k, sy = g.cy - vert * g.k;
    if (sx < 0 || sy < 0 || sx > g.cw || sy > g.ch) continue;
    if (isIn) {
-    inside.rect(sx - szTarget / 2, sy - szTarget / 2, szTarget, szTarget);
+    inside.rect(sx - sz / 2, sy - sz / 2, sz, sz);
    } else {
     const gz = plane ? planeZ(plane, x, y) : bz0;
     const dz = z - gz;
     if (dz < 0.16) {
-     aroundGround.rect(sx - szAround / 2, sy - szAround / 2, szAround, szAround);
+     aroundGround.rect(sx - sz / 2, sy - sz / 2, sz, sz);
     } else if (dz < 1.4) {
-     aroundBody.rect(sx - szAround / 2, sy - szAround / 2, szAround, szAround);
+     aroundBody.rect(sx - sz / 2, sy - sz / 2, sz, sz);
     } else {
-     aroundHigh.rect(sx - szAround / 2, sy - szAround / 2, szAround, szAround);
+     aroundHigh.rect(sx - sz / 2, sy - sz / 2, sz, sz);
     }
    }
   }
@@ -8510,6 +9300,17 @@ function fcRender3D(row, canvas, g, pal) {
   }
  }
 
+ const ring = fcFootGroundRing(row);
+ if (ring) {
+  fcStrokePoly(ctx, ring.map(([x, y, z]) => toScreen3D(x, y, z)), FOOT_GROUND_COLOR, 1.8);
+  canvas.dataset.groundScan = 'visible';
+ } else {
+  delete canvas.dataset.groundScan;
+ }
+ const preview = footGroundPreview?.fullControl && footGroundPreview.rows.get(`${row.frame}:${fc.targetId}`);
+ if (preview?.changed && !row.draft && fcSamePoints(preview.before, row.base)) {
+  drawWireBox(preview.after, FOOT_GROUND_COLOR, FOOT_GROUND_COLOR, [5, 4]);
+ }
  if (row.draft) drawWireBox(anchor, pal.boxDraft, pal.boxDraft, [4, 3]);
  drawWireBox(p, row.outside ? pal.boxOutside : pal.boxStroke, row.outside ? pal.boxOutside : pal.boxFront, null);
 
@@ -8638,14 +9439,99 @@ function fcRender3D(row, canvas, g, pal) {
  const z3dVal = (row.zoom3d ?? fc.cfg.zoom3d ?? 1).toFixed(1);
  const panTag = hasPan ? (focusId ? ` · Tâm #${focusId}` : ` · Lệch (${panU.toFixed(1)},${panV.toFixed(1)}m)`) : '';
  ctx.fillText(`Góc ${(az * DEG).toFixed(0)}°/${(el * DEG).toFixed(0)}° · Zoom ${z3dVal}×${panTag}`, 36, g.ch - 6);
- if (!fullScene && ((!cloud && !sceneCloud) || (isScene3D && fc.cfg.fullSceneDetail))) {
+ if (!fullScene && !row.outside && ((!cloud && !sceneCloud) || (isScene3D && fc.cfg.fullSceneDetail))) {
   ctx.textAlign = 'right';
-  ctx.fillText(isScene3D && fc.cfg.fullSceneDetail ? 'Bấm Tới để nạp đủ điểm' : 'chưa có cloud', g.cw - 6, 30);
+  const message = row.detailPending ? 'Đang nạp đủ điểm…'
+   : row.detailError ? 'Không đọc được cloud · bấm Tới để thử lại'
+    : fcCanReadCloud && !safeData() && fcLayout() !== 'table' ? 'Đang chờ nạp cloud…'
+     : isScene3D && fc.cfg.fullSceneDetail ? 'Bấm Tới để nạp đủ điểm' : 'chưa có cloud';
+  ctx.fillText(message, g.cw - 6, 30);
   ctx.textAlign = 'left';
  }
 }
 
 const projectionPaths = new WeakMap();
+
+// Side and Front clip along the viewing axis with CVAT's 10 cm margin.
+const projectionLayers = new WeakMap();
+
+function drawFullProjection(ctx, canvas, g, pal, row, plane, cloud) {
+ const anchor = row.base;
+ const view = canvas.dataset.view;
+ const top = view === 'top', side = view === 'side';
+ const [a, b, c] = plane ? [plane.a, plane.b, plane.c] : [0, 0, bottomZ(anchor)];
+ const colors = [pal.ptGround, pal.ptAround, pal.ptInside];
+ const key = [g.cw, g.ch, g.k, g.cx, g.cy, fc.cfg.pointSize, a, b, c, ...colors].join('|');
+ let layer = projectionLayers.get(canvas);
+ if (!layer) {
+  const imageCanvas = document.createElement('canvas');
+  layer = { canvas: imageCanvas, ctx: imageCanvas.getContext('2d') };
+  projectionLayers.set(canvas, layer);
+ }
+
+ if (layer.cloud !== cloud || layer.anchor !== anchor || layer.key !== key) {
+  const width = g.cw, height = g.ch;
+  if (layer.canvas.width !== width || layer.canvas.height !== height || !layer.image) {
+   layer.canvas.width = width;
+   layer.canvas.height = height;
+   layer.image = layer.ctx.createImageData(width, height);
+   layer.pixels = new Uint32Array(layer.image.data.buffer);
+  }
+  const paletteKey = colors.join('|');
+  if (layer.paletteKey !== paletteKey) {
+   layer.ctx.clearRect(0, 0, 3, 1);
+   for (const [index, color] of colors.entries()) {
+    layer.ctx.fillStyle = color;
+    layer.ctx.fillRect(index, 0, 1, 1);
+   }
+   layer.colors = new Uint32Array(layer.ctx.getImageData(0, 0, 3, 1).data.buffer);
+   layer.paletteKey = paletteKey;
+  }
+  const [road, around, inside] = layer.colors;
+  const pixels = layer.pixels;
+  pixels.fill(0);
+  const paint = cloudPointPainter(pixels, width, height, fc.cfg.pointSize, inside);
+  const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
+  const [r0, r1, r2] = rotationMatrix(anchor[3], anchor[4], anchor[5]);
+  const hl = Math.abs(anchor[6]) / 2, hw = Math.abs(anchor[7]) / 2, hh = Math.abs(anchor[8]) / 2;
+  const depthAxis = side ? 1 : 0;
+  const depthLimit = (side ? hw : hl) + 0.1;
+  const boxRadius = Math.hypot(hl, hw, hh);
+  let nIn = 0;
+  for (let i = 0; i + 2 < cloud.length; i += 3) {
+   const x = cloud[i], y = cloud[i + 1], z = cloud[i + 2];
+   const dx = x - anchor[0], dy = y - anchor[1], dz = z - anchor[2];
+   const u = dx * ac + dy * as, v = -dx * as + dy * ac;
+   const sx = Math.floor(g.cx + (top ? -v : side ? u : v) * g.k);
+   const sy = Math.floor(g.cy - (top ? u : dz) * g.k);
+   const visible = sx >= 0 && sx < width && sy >= 0 && sy < height;
+   if ((!visible && !(top && Math.abs(dx) <= boxRadius && Math.abs(dy) <= boxRadius && Math.abs(dz) <= boxRadius)) ||
+       !Number.isFinite(dz)) continue;
+   const depth = r0[depthAxis] * dx + r1[depthAxis] * dy + r2[depthAxis] * dz;
+   if (!top && Math.abs(depth) > depthLimit) continue;
+   const eu = side ? r0[0] * dx + r1[0] * dy + r2[0] * dz : depth;
+   const ev = side ? depth : r0[1] * dx + r1[1] * dy + r2[1] * dz;
+   const ew = r0[2] * dx + r1[2] * dy + r2[2] * dz;
+   const isIn = Math.abs(eu) <= hl && Math.abs(ev) <= hw && Math.abs(ew) <= hh;
+   if (isIn && top) nIn++;
+   if (!visible) continue;
+   if (isIn) {
+    paint(sx, sy, inside);
+   } else if (z - (a * x + b * y + c) < 0.12) {
+    paint(sx, sy, road, true);
+   } else {
+    paint(sx, sy, around);
+   }
+  }
+  layer.ctx.putImageData(layer.image, 0, 0);
+  Object.assign(layer, { cloud, anchor, key, nIn });
+ }
+ if (top) row.pointsIn = layer.nIn;
+ const smoothing = ctx.imageSmoothingEnabled;
+ ctx.imageSmoothingEnabled = false;
+ ctx.drawImage(layer.canvas, 0, 0);
+ ctx.imageSmoothingEnabled = smoothing;
+}
 
 function fcRenderView(row, canvas) {
  const view = canvas.dataset.view;
@@ -8708,18 +9594,24 @@ function fcRenderView(row, canvas) {
  }
 
  // Point cloud: lọc hành lang độ sâu (Slice) + phân loại trong box (sáng) / mặt đất / xung quanh
- const cloud = fcCloud(row);
- if (cloud) {
+ const wideProjection = fcLayout() !== 'table' && fc.cfg.fullSceneDetail &&
+  (fc.cfg.slice === 'tight' || fc.cfg.slice === 'scene');
+ const fullCloud = row.projectionCloud || (wideProjection && fullSceneCache.get(sceneKey(row.frame)));
+ const cloud = fullCloud || fcCloud(row);
+ canvas.dataset.cloudDensity = fullCloud ? 'full' : cloud ? 'near' : 'empty';
+ if (fullCloud) {
+  drawFullProjection(ctx, canvas, g, pal, row, plane, fullCloud);
+ } else if (cloud) {
   // During a drag, keep the cloud fixed and move only the cuboid overlay.
   const sampleBox = anchor;
-  const key = [g.cw, g.ch, g.k, g.cx, g.cy, fc.cfg.slice, plane?.a, plane?.b, plane?.c].join('|');
+  const sz = fc.cfg.pointSize;
+  const key = [g.cw, g.ch, g.k, g.cx, g.cy, fc.cfg.slice, sz, plane?.a, plane?.b, plane?.c].join('|');
   let paths = projectionPaths.get(canvas);
   if (paths?.cloud !== cloud || paths?.anchor !== anchor || paths?.key !== key) {
    const ac = Math.cos(anchor[5]), as = Math.sin(anchor[5]);
    const R = rotationMatrix(sampleBox[3], sampleBox[4], sampleBox[5]);
    const hl = Math.abs(sampleBox[6]) / 2, hw = Math.abs(sampleBox[7]) / 2, hh = Math.abs(sampleBox[8]) / 2;
    const inside = new Path2D(), around = new Path2D(), ground = new Path2D();
-   const sz = g.k > 60 ? 2 : 1.5;
    let nIn = 0;
    for (let i = 0; i + 2 < cloud.length; i += 3) {
     const x = cloud[i], y = cloud[i + 1], z = cloud[i + 2];
@@ -8961,7 +9853,7 @@ function fcRenderList() {
   empty.className = 'cqt-fc-empty';
   empty.textContent = fc.allRows.length
    ? 'Không có frame nào khớp bộ lọc hiện tại.'
-   : 'Nhập Object ID (hoặc bấm "Lấy đang chọn") rồi bấm "Nạp Track" để hiện mọi frame của object.';
+   : 'Nhập Object ID rồi bấm “Nạp object”, hoặc bấm “Lấy đang chọn”.';
   list.appendChild(empty);
   return fcUpdateBars();
  }
@@ -8981,6 +9873,7 @@ function fcRenderList() {
   fc.observer.observe(row.el);
  }
  fcUpdateBars();
+ if (fcLayout() === 'focus') fcScrollToFocus(fcRowByFrame(fc.focusFrame));
 }
 
 // Chỉ vẽ hàng gần vùng nhìn thấy; hàng khuất được giải phóng bộ nhớ canvas
@@ -8993,11 +9886,14 @@ function fcOnIntersect(entries) {
    fcSchedule([row]);
   } else {
    for (const c of en.target.querySelectorAll('canvas')) {
+    projectionLayers.delete(c);
+    projectionPaths.delete(c);
     c.width = 0;
     c.height = 0;
    }
   }
  }
+ fcQueueVisibleDetail();
 }
 
 function fcUpdateRowMeta(row) {
@@ -9010,6 +9906,7 @@ function fcUpdateRowMeta(row) {
  el.classList.toggle('current', row.frame === getFrame());
  const kf = el.querySelector('[data-role="kf"]');
  kf.textContent = row.outside ? 'OUT' : row.key ? 'KEY' : 'LERP';
+ kf.hidden = fc.objectType === 'shape' && !row.outside;
  kf.className = 'cqt-badge ' + (row.outside ? 'cqt-badge-out' : row.key ? 'cqt-badge-key' : 'cqt-badge-lerp');
  const values = {
   l: Math.abs(p[6]).toFixed(2),
@@ -9084,6 +9981,16 @@ function fcRefreshAll() {
  fcUpdateBars();
 }
 
+function fcUpdateFocusNav() {
+ const position = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
+ $('cqt-fc-focus-label').textContent = position >= 0
+  ? `F${fc.focusFrame} · ${position + 1}/${fc.filteredRows.length}` : '—';
+ $('cqt-fc-focus-prev').disabled = position <= 0;
+ $('cqt-fc-focus-next').disabled = position < 0 || position >= fc.filteredRows.length - 1;
+ if (footGroundPreview?.fullControl && footGroundPreview.key !== footGroundSelectionKey(true)) clearFootGroundPreview();
+ refreshGroundScanRing();
+}
+
 function fcUpdateBars() {
  if (!fc.el) return;
  const h = fc.healthStats || fcComputeHealthStats();
@@ -9095,21 +10002,29 @@ function fcUpdateBars() {
   range: hasRange ? fc.allRows.filter((r) => r.frame >= start && r.frame <= end).length : 0,
   issue: fc.allRows.filter((r) => r.hasIssue).length,
  };
+ const isShape = fc.objectType === 'shape';
+ const summary = $('cqt-fc-object-summary');
+ const present = h.visRows.length;
+ const outside = fc.allRows.length - present;
+ summary.textContent = !fc.allRows.length ? '' : isShape
+  ? `Shape · ${present} frame · F${fc.allRows[0].frame}${outside ? ' · Outside' : ''}`
+  : `Track · ${present} frame hiện diện · ${h.visRows.filter((r) => r.key).length} keyframe${outside ? ` · ${outside} Outside` : ''}`;
+ summary.hidden = !fc.allRows.length;
+ fc.el.classList.toggle('shape-object', isShape);
  fc.el.querySelectorAll('[data-count]').forEach((s) => { s.textContent = String(counts[s.dataset.count] ?? 0); });
  fc.el.querySelectorAll('[data-fc-filter]').forEach((b) => b.classList.toggle('active', b.dataset.fcFilter === fc.cfg.filter));
  const layout = fcLayout();
  fc.el.classList.toggle('focus-layout', layout === 'focus');
  fc.el.classList.toggle('stacked-layout', layout === 'stacked');
+ const rowHeight = $('cqt-fc-rowh');
+ rowHeight.disabled = layout === 'stacked';
+ rowHeight.parentElement.title = rowHeight.disabled ? '3D lớn tự căn chiều cao theo vùng làm việc' : 'Chiều cao ưu tiên của khung trong mỗi frame';
  for (const button of fc.el.querySelectorAll('[data-fc-layout]')) {
   const active = button.dataset.fcLayout === layout;
   button.classList.toggle('active', active);
   button.setAttribute('aria-pressed', String(active));
  }
- const position = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
- $('cqt-fc-focus-label').textContent = position >= 0
-  ? `F${fc.focusFrame} · ${position + 1}/${fc.filteredRows.length}` : '—';
- $('cqt-fc-focus-prev').disabled = position <= 0;
- $('cqt-fc-focus-next').disabled = position < 0 || position >= fc.filteredRows.length - 1;
+ fcUpdateFocusNav();
  const healthBox = $('cqt-fc-health-badges');
  if (healthBox) {
   if (!fc.allRows.length) {
@@ -9386,6 +10301,7 @@ function fcRowAtPoint(x, y) {
 function fcAutoScroll(y) {
  const list = $('cqt-fc-list');
  if (!list) return;
+ list.classList.add('is-frame-dragging');
  const r = list.getBoundingClientRect();
  if (y < r.top + 36) list.scrollTop -= 18;
  else if (y > r.bottom - 36) list.scrollTop += 18;
@@ -9748,6 +10664,7 @@ async function fcOnMouseUp(e) {
  const d = fc.drag;
  if (!d || d.dock) return;
  fc.drag = null;
+ $('cqt-fc-list')?.classList.remove('is-frame-dragging');
  if (d.type === 'orbit3d' || d.type === 'pan3d') {
   if (!d.moved && e) fcSelectClick(d.row, e);
   else if (!d.singleRow) saveFcSettings({ camAz: fc.cfg.camAz, camEl: fc.cfg.camEl, camPan: fc.cfg.camPan });
@@ -9785,6 +10702,7 @@ async function fcOnMouseUp(e) {
 function fcCancelDrag() {
  const d = fc.drag;
  fc.drag = null;
+ $('cqt-fc-list')?.classList.remove('is-frame-dragging');
  if (d?.type === 'edit') {
   for (const r of d.targets) r.draft = null;
   fcSchedule(d.targets);
@@ -9808,9 +10726,15 @@ const FC_HTML = `
   </div>
   <div class="cqt-fc-head-tools">
    <span class="cqt-label">Object</span>
-   <input type="number" id="cqt-fc-target" class="cqt-input" placeholder="ID" min="1" step="1" inputmode="numeric" data-object-id aria-label="Object ID" />
-   <button id="cqt-fc-pick" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Lấy object đang chọn trên canvas rồi nạp track">Lấy đang chọn</button>
-   <button id="cqt-fc-load" class="cqt-btn cqt-btn-primary cqt-sm cqt-none" title="Đọc mọi frame của object và quét point cloud (Enter)">Nạp Track</button>
+   <input type="number" id="cqt-fc-target" class="cqt-input" placeholder="ID" min="1" step="1" inputmode="numeric" data-object-id aria-label="Object ID" title="ID hiển thị trong danh sách Objects của CVAT" />
+   <span id="cqt-fc-object-summary" class="cqt-label" aria-live="polite" hidden></span>
+   <div class="cqt-fc-seg" role="group" aria-label="Bố cục Full Control">
+    <button type="button" data-fc-layout="table" aria-pressed="true" title="Bảng track (1)">Bảng track</button>
+    <button type="button" data-fc-layout="focus" aria-pressed="false" title="Frame lớn (2) · Cuộn để chuyển frame">Frame lớn</button>
+    <button type="button" data-fc-layout="stacked" aria-pressed="false" title="3D lớn (3) · Cuộn để chuyển frame">3D lớn</button>
+   </div>
+   <button id="cqt-fc-pick" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Nạp object đang chọn trên canvas hoặc trong danh sách Objects">Lấy đang chọn</button>
+   <button id="cqt-fc-load" class="cqt-btn cqt-btn-primary cqt-sm cqt-none" title="Nạp cuboid độc lập hoặc track theo Object ID (Enter)">Nạp object</button>
    <button id="cqt-fc-rescan" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Xoá cache và quét lại point cloud mọi frame">${ICONS.refresh}<span>Quét lại Cloud</span></button>
    <button id="cqt-fc-safedata" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Bật / Tắt Chế độ an toàn dữ liệu (hoặc Tự nạp Cloud đa frame)"></button>
    <div class="cqt-fc-progress" title="Tiến trình nạp point cloud"><div id="cqt-fc-progress-bar"></div></div>
@@ -9833,30 +10757,30 @@ const FC_HTML = `
 
  <div id="cqt-fc-toolbar" class="cqt-fc-toolbar" hidden>
  <div class="cqt-fc-bar">
-  <div class="cqt-fc-seg">
+  <div class="cqt-fc-seg" data-fc-track-only>
    <button data-fc-filter="all">Tất cả <span data-count="all">0</span></button>
    <button data-fc-filter="key">Keyframe <span data-count="key">0</span></button>
    <button data-fc-filter="range" title="Theo dải Start–End trên panel chính">Dải Start–End <span data-count="range">0</span></button>
    <button data-fc-filter="issue" title="Chỉ hiện các frame bị lệch LWH (đỏ) hoặc vượt Limit (cam)">Lỗi <span data-count="issue">0</span></button>
   </div>
-  <div class="cqt-fc-seg" aria-label="Bố cục Full Control">
-   <button type="button" data-fc-layout="table" aria-pressed="true">Bảng track</button>
-   <button type="button" data-fc-layout="focus" aria-pressed="false">Frame lớn</button>
-   <button type="button" data-fc-layout="stacked" aria-pressed="false" title="3D lớn trên Top, Side, Front cho mỗi frame. Cuộn để xem các frame nối tiếp.">3D lớn</button>
-  </div>
-  <div class="cqt-fc-focus-nav">
+  <div class="cqt-fc-focus-nav" data-fc-track-only>
    <button id="cqt-fc-focus-prev" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame trước">‹</button>
-   <span id="cqt-fc-focus-label" class="cqt-label"></span>
+   <span id="cqt-fc-focus-label" class="cqt-label" aria-live="polite"></span>
    <button id="cqt-fc-focus-next" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame sau">›</button>
   </div>
   <div id="cqt-fc-health-badges" class="cqt-hp-badges"></div>
  </div>
  <div id="cqt-fc-limits" hidden></div>
- <details class="cqt-fc-disclosure">
- <summary>Hiển thị và điều khiển</summary>
+ <div class="cqt-fc-bar cqt-fc-tabs" role="tablist" aria-label="Nhóm công cụ Full Control">
+  <button type="button" class="cqt-tab active" role="tab" id="cqt-fc-tab-view" data-fc-toolbar-tab="view" aria-selected="true" aria-controls="cqt-fc-view-controls">Hiển thị</button>
+  <button type="button" class="cqt-tab" role="tab" id="cqt-fc-tab-track" data-fc-toolbar-tab="track" aria-selected="false" aria-controls="cqt-fc-track-controls" tabindex="-1">Frame &amp; Track</button>
+  <button type="button" class="cqt-tab" role="tab" id="cqt-fc-tab-ground" data-fc-toolbar-tab="ground" aria-selected="false" aria-controls="cqt-fc-ground-controls" tabindex="-1">Fit Ground</button>
+ </div>
+ <section id="cqt-fc-view-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-view">
  <div class="cqt-fc-bar">
   <label class="cqt-fc-ctl" title="Chiều cao ưu tiên của khung trong mỗi frame">Cỡ hàng <input type="range" id="cqt-fc-rowh" min="100" max="360" step="10" /></label>
   <label class="cqt-fc-ctl" title="Phóng to hình chiếu (hoặc Alt/Ctrl + lăn chuột trên danh sách)">Zoom <input type="range" id="cqt-fc-zoom" min="0.5" max="4" step="0.1" /><span id="cqt-fc-zoom-val" class="cqt-label"></span></label>
+  <label class="cqt-fc-ctl" title="Dùng − hoặc + để đổi cỡ điểm trong Full Control">Cỡ điểm <input type="range" id="cqt-fc-point-size" aria-label="Cỡ điểm" min="1" max="${FC_MAX_POINT_SIZE}" step="1" /></label>
   <span class="cqt-fc-sep"></span>
   <label class="cqt-fc-ctl" title="Giới hạn độ sâu đám mây điểm quanh box để loại bỏ xe/cây ở làn bên cạnh đè vào hình chiếu Side / Front">Lọc điểm
    <select id="cqt-fc-slice" class="cqt-input">
@@ -9868,7 +10792,7 @@ const FC_HTML = `
   </label>
   <button id="cqt-fc-toggle-3d" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Hiện / Ẩn cột tương tác 3D (xoay quanh xe &amp; kéo thả hộp 3D)">Cột 3D</button>
   <button id="cqt-fc-scene3d" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Hiển thị toàn bộ đám mây điểm 3D quanh xe + mọi cuboid khác trong frame trên cột 3D (Ctrl/Alt + Lăn chuột trên ô 3D để zoom riêng)">${ICONS.globe}<span>Toàn cảnh 3D</span></button>
-  <button id="cqt-fc-full-detail" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" type="button" aria-pressed="true" title="Hiện tất cả điểm của frame đã nạp. Bấm Tới để nạp đủ điểm cho frame đó.">Đầy đủ điểm</button>
+  <button id="cqt-fc-full-detail" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" type="button" aria-pressed="true" title="Khi bật Tự nạp Cloud, nạp đủ điểm cho track. Nếu vượt bộ nhớ đệm, các frame còn lại tự nạp khi xem.">Đầy đủ điểm</button>
   <button id="cqt-fc-live3d" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" title="Chia đôi màn hình (Split View): mở song song khung 3D WebGL thật của CVAT và tự đồng bộ frame + căn tâm camera 3D khi chọn hàng">${ICONS.split}<span>3D CVAT Live</span></button>
   <div id="cqt-fc-live-layouts" class="cqt-fc-seg" style="display:none;" title="Chọn bố cục chia màn hình 3D CVAT Live (hoặc kéo thanh tiêu đề Full Control để chỉnh tỷ lệ)">
    <button data-split-mode="bottom" title="Chia Trên / Dưới: Phía trên hiện 3D CVAT + Ảnh Camera (tự căn tâm camera 3D), phía dưới là Full Control">${ICONS.panelBottom}<span>Dưới</span></button>
@@ -9896,10 +10820,9 @@ const FC_HTML = `
    </select>
   </label>
  </div>
- </details>
+ </section>
 
- <details class="cqt-fc-disclosure" open>
- <summary>Thao tác theo frame và track</summary>
+ <section id="cqt-fc-track-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-track" hidden>
  <div class="cqt-fc-bar cqt-fc-batch">
   <span class="cqt-label"><b id="cqt-fc-selcount" style="color:var(--cqt-text);">0</b> frame đang chọn</span>
   <button id="cqt-fc-sel-all" class="cqt-btn cqt-btn-secondary cqt-sm" title="Chọn các frame khớp bộ lọc, kể cả khi đang xem một frame">Chọn frame đã lọc</button>
@@ -9936,26 +10859,29 @@ const FC_HTML = `
    <button id="cqt-fc-confirm-in" class="cqt-btn cqt-btn-secondary cqt-sm cqt-hp-btn-in" title="Xác nhận khôi phục Inside (hiện lại) theo phạm vi bên trái">${ICONS.eye}<span>Inside</span></button>
   </div>
  </div>
- </details>
- <details id="cqt-fc-ground-controls" class="cqt-fc-disclosure cqt-fc-ground">
-  <summary>Fit Ground</summary>
+ </section>
+ <section id="cqt-fc-ground-controls" class="cqt-fc-ground" role="tabpanel" aria-labelledby="cqt-fc-tab-ground" hidden>
   <div class="cqt-row cqt-wrap cqt-ground-controls">
-   ${groundFitSelect('cqt-fc-ground-kind', 'Nguồn và phạm vi', GROUND_FIT_CHOICES)}
-   ${groundFitSelect('cqt-fc-ground-scope', 'Phạm vi dải', { selected: 'Frame đã chọn', track: 'Toàn track' })}
+   ${groundFitSelect('cqt-fc-ground-kind', 'Nguồn', GROUND_FIT_CHOICES)}
+   ${groundFitSelect('cqt-fc-ground-scope', 'Phạm vi', groundScopeChoices(true))}
    ${groundFitSelect('cqt-fc-ground-mode', 'Cách đặt', GROUND_FIT_MODES)}
    ${groundFitSelect('cqt-fc-ground-direction', 'Hướng', GROUND_FIT_DIRECTIONS)}
    <label id="cqt-fc-ground-anchor-field" class="cqt-col" hidden><span class="cqt-label">Anchor ID ưu tiên</span>
     <input id="cqt-fc-ground-anchor-ids" class="cqt-input" type="text" placeholder="vd: 1, 4" />
    </label>
-   <button id="cqt-fc-ground" class="cqt-btn cqt-btn-primary cqt-sm">Fit theo mốc</button>
+   <button id="cqt-fc-ground" class="cqt-btn cqt-btn-primary cqt-sm">Áp dụng Fit Ground</button>
    <button type="button" id="cqt-fc-ground-measure" class="cqt-btn cqt-btn-secondary cqt-sm" title="Đo theo nguồn và phạm vi đã chọn">Đo đáy</button>
+   <button type="button" id="cqt-fc-ground-preview" class="cqt-btn cqt-btn-secondary cqt-sm">Xem trước</button>
+   <button type="button" id="cqt-fc-ground-apply" class="cqt-btn cqt-btn-primary cqt-sm" hidden>Áp dụng</button>
   </div>
+  ${footGroundFields('cqt-fc-ground-')}
   <p id="cqt-fc-ground-origin-hint" class="cqt-hint" hidden>${LIDAR_ORIGIN_HINT}</p>
+  <p id="cqt-fc-ground-scene-hint" class="cqt-hint" hidden>Ước lượng một mặt phẳng đất từ toàn bộ cloud của từng frame.</p>
   <div id="cqt-fc-ground-lidar-fields" class="cqt-row cqt-wrap cqt-ground-controls" hidden>
    ${lidarGroundFields('fc-')}
   </div>
   <div id="cqt-fc-ground-result" class="cqt-ground-result" role="status" hidden></div>
- </details>
+ </section>
  </div>
  </div>
 
@@ -10057,12 +10983,50 @@ function fcSyncControls() {
  fc.el.style.setProperty('--fc-row-h', `${c.rowH}px`);
  setField('cqt-fc-rowh', c.rowH);
  setField('cqt-fc-zoom', c.zoom);
+ setField('cqt-fc-point-size', c.pointSize);
  setField('cqt-fc-slice', c.slice || 'tight');
  setField('cqt-fc-fillmode', c.fillMode);
  setField('cqt-fc-anchor', c.anchor);
  const zv = $('cqt-fc-zoom-val');
  if (zv) zv.textContent = `${Number(c.zoom).toFixed(1)}×`;
  fcUpdateBars();
+}
+
+function fcSetPointSize(value, notify = false) {
+ const pointSize = clamp(Math.round(value), 1, FC_MAX_POINT_SIZE);
+ if (fc.cfg.pointSize !== pointSize) {
+  saveFcSettings({ pointSize });
+  setField('cqt-fc-point-size', pointSize);
+  fcRerenderVisible();
+  if (dockOn()) scheduleDockRender();
+ }
+ if (notify) showToast(`Cỡ điểm ${Math.round(100 * pointSize / FC_MAX_POINT_SIZE)}/100`);
+}
+
+function fcSetLayout(next) {
+ if (next === fcLayout()) return;
+ const list = $('cqt-fc-list');
+ const listTop = list.getBoundingClientRect().top;
+ const firstVisible = fc.rows.find((row) => row.el?.getBoundingClientRect().bottom > listTop);
+ fc.layout = next;
+ if (next === 'focus') fc.focusFrame = firstVisible?.frame ?? fc.lastClicked ?? fc.focusFrame;
+ fcRenderList();
+ if (next !== 'focus' && firstVisible?.el) {
+  list.scrollTop += firstVisible.el.getBoundingClientRect().top - listTop;
+ }
+}
+
+function fcSelectToolbarTab(name, focus = false) {
+ for (const button of fc.el.querySelectorAll('[data-fc-toolbar-tab]')) {
+  const active = button.dataset.fcToolbarTab === name;
+  button.classList.toggle('active', active);
+  button.setAttribute('aria-selected', String(active));
+  button.tabIndex = active ? 0 : -1;
+  $(button.getAttribute('aria-controls')).hidden = !active;
+  if (active && focus) button.focus({ preventScroll: true });
+ }
+ fcRerenderVisible('3d');
+ refreshGroundScanRing();
 }
 
 function fcSetZoom(z) {
@@ -10100,6 +11064,10 @@ function fcQueueToolbarCollapse(touch = false) {
 function fcBindWindow(el) {
  const on = (id, fn, event = 'click') => el.querySelector('#' + id)?.addEventListener(event, guarded(fn));
  const list = el.querySelector('#cqt-fc-list');
+ let frameWheelDelta = 0;
+ let lastFrameWheel = -Infinity;
+ let frameWheelDirection = 0;
+ const stepFocus = guarded(fcStepFocus);
 
  el.querySelectorAll('.cqt-fc-resizer').forEach((r) => r.addEventListener('mousedown', (e) => fcStartResize(e, r.dataset.dir)));
  const head = el.querySelector('#cqt-fc-head');
@@ -10142,8 +11110,22 @@ function fcBindWindow(el) {
  listen(window, 'mousemove', fcOnMouseMove);
  listen(window, 'mouseup', guarded(fcOnMouseUp));
  listen(window, 'resize', () => { if (fc.open) fcApplyBounds(); });
- fc.resizeObserver = new ResizeObserver(() => fcRerenderVisible());
+ fc.resizeObserver = new ResizeObserver(() => {
+  if (fcLayout() === 'focus' && !fc.drag) fcScrollToFocus(fcRowByFrame(fc.focusFrame));
+  fcRerenderVisible();
+ });
  fc.resizeObserver.observe(list);
+ list.addEventListener('scroll', () => {
+  if (fcLayout() === 'focus' && list.clientHeight && !fc.drag) {
+   const index = Math.round(list.scrollTop / list.clientHeight);
+   const row = fc.rows[index];
+   if (row && row.frame !== fc.focusFrame) {
+    fc.focusFrame = row.frame;
+    fcUpdateFocusNav();
+   }
+  }
+  fcQueueVisibleDetail();
+ }, { passive: true });
 
  // Header
  on('cqt-fc-theme', toggleTheme);
@@ -10153,32 +11135,35 @@ function fcBindWindow(el) {
  on('cqt-fc-qc', () => openQCWorkspace());
  on('cqt-fc-focus-prev', () => fcStepFocus(-1));
  on('cqt-fc-focus-next', () => fcStepFocus(1));
- el.querySelectorAll('[data-fc-layout]').forEach((button) => button.addEventListener('click', () => {
-  const current = fcLayout();
-  const next = button.dataset.fcLayout;
-  if (next === current) return;
-  const listTop = list.getBoundingClientRect().top;
-  const firstVisible = fc.rows.find((row) => row.el?.getBoundingClientRect().bottom > listTop);
-  fc.layout = next;
-  if (next === 'focus') fc.focusFrame = fc.lastClicked ?? firstVisible?.frame ?? fc.focusFrame;
-  fcRenderList();
-  if (next !== 'focus' && firstVisible?.el) {
-   list.scrollTop += firstVisible.el.getBoundingClientRect().top - listTop;
-  }
- }));
+ el.querySelectorAll('[data-fc-layout]').forEach((button) =>
+  button.addEventListener('click', () => fcSetLayout(button.dataset.fcLayout)));
+ const tabs = [...el.querySelectorAll('[data-fc-toolbar-tab]')];
+ tabs.forEach((button, index) => {
+  button.addEventListener('click', () => fcSelectToolbarTab(button.dataset.fcToolbarTab));
+  button.addEventListener('keydown', (e) => {
+   const next = { ArrowLeft: (index + tabs.length - 1) % tabs.length,
+    ArrowRight: (index + 1) % tabs.length, Home: 0, End: tabs.length - 1 }[e.key];
+   if (next === undefined) return;
+   swallow(e);
+   fcSelectToolbarTab(tabs[next].dataset.fcToolbarTab, true);
+  });
+ });
  on('cqt-fc-max', fcToggleMaximize);
  on('cqt-fc-undo', async () => { await restoreLatestSnapshot(); });
  on('cqt-fc-redo', async () => { await redoLatestSnapshot(); });
  on('cqt-fc-pick', () => {
   const id = activeId();
   if (id === null) return fail('Chưa chọn object nào trên canvas.');
-  return fcLoadTrack(id);
+  return fcLoadObject(id);
  });
- on('cqt-fc-load', () => fcLoadTrack());
+ on('cqt-fc-load', () => fcLoadObject());
  on('cqt-fc-target', (e) => updateObjectIdValidity(e.target), 'input');
- on('cqt-fc-target', (e) => (e.key === 'Enter' ? fcLoadTrack() : null), 'keydown');
+ on('cqt-fc-target', (e) => (e.key === 'Enter' ? fcLoadObject() : null), 'keydown');
  on('cqt-fc-rescan', () => fcHarvest(true));
- on('cqt-fc-safedata', () => setSafeData(!safeData()));
+ on('cqt-fc-safedata', () => {
+  setSafeData(!safeData());
+  fcQueueVisibleDetail();
+ });
  on('cqt-fc-stop', () => { fc.abort = true; });
 
  // Bộ lọc & hiển thị
@@ -10202,6 +11187,7 @@ function fcBindWindow(el) {
   fcRerenderVisible();
  }, 'input');
  on('cqt-fc-zoom', () => fcSetZoom(numVal('cqt-fc-zoom') || 1), 'input');
+ on('cqt-fc-point-size', (e) => fcSetPointSize(e.target.valueAsNumber, true), 'input');
  on('cqt-fc-slice', () => {
   const sl = val('cqt-fc-slice') || 'tight';
   saveFcSettings({ slice: sl, ...(sl === 'scene' ? { scene3d: true } : {}) });
@@ -10230,8 +11216,7 @@ function fcBindWindow(el) {
   if (fc.cfg.fullSceneDetail) {
    const frame = getFrame();
    const positions = getPointCloudPositions();
-   if (positions && Number.isInteger(frame) && !annotationState()?.player?.frame?.fetching &&
-       (dock.cloudFrame === frame || positions !== dock.cloudRef)) {
+   if (positions && Number.isInteger(frame) && loadedCloudFrame() === frame) {
     rememberFullScene(sceneKey(frame), positions);
    }
   } else {
@@ -10239,6 +11224,7 @@ function fcBindWindow(el) {
   }
   fcUpdateBars();
   fcRerenderVisible();
+  if (fc.cfg.fullSceneDetail && !safeData()) return fcHarvest(false);
  });
  on('cqt-fc-live3d', () => {
   const next = !fc.cfg.live3d;
@@ -10300,7 +11286,7 @@ function fcBindWindow(el) {
  });
  on('cqt-fc-sync-lwh', fcSyncLWH);
  on('cqt-fc-clamp-limit', async () => {
-  if (!Number.isInteger(fc.targetId)) return fail('Chưa nạp Track.');
+  if (!Number.isInteger(fc.targetId)) return fail('Chưa nạp object.');
   await clampObjectToLimits(fc.targetId);
  });
  on('cqt-fc-interp', () => fcInterpolate(fcSelectedRows(), 'Nội suy đầu → cuối'));
@@ -10308,9 +11294,13 @@ function fcBindWindow(el) {
  on('cqt-fc-ground', () => runGroundFit(val('cqt-fc-ground-kind'), { fullControl: true }));
  on('cqt-fc-ground-measure', () => runGroundFit(val('cqt-fc-ground-kind'), { fullControl: true, measure: true }));
  on('cqt-fc-ground-kind', () => syncGroundFitControls(true), 'change');
+ on('cqt-fc-ground-preview', () => previewFootGround(true));
+ on('cqt-fc-ground-apply', () => applyFootGroundPreview(true));
+ for (const field of ['scope', 'mode', 'direction']) on('cqt-fc-ground-' + field, clearFootGroundPreview, 'change');
  on('cqt-fc-ground-anchor-ids', (e) => setReferenceBoxIds(parseReferenceBoxIds(e.target.value)), 'change');
  bindGroundMissing($('cqt-fc-ground-result'), true);
  bindLidarGroundFields(on, 'fc-');
+ bindFootGroundFields(on, 'cqt-fc-ground-');
  syncGroundFitControls(true);
  on('cqt-fc-flat', () => fcFlattenRows(fcSelectedRows()));
  on('cqt-fc-key-on', () => {
@@ -10432,18 +11422,41 @@ function fcBindWindow(el) {
  });
  list.addEventListener('wheel', (e) => {
   const canvas = e.target.closest?.('canvas[data-view]');
-  const focus = fcLayout() === 'focus';
+  const layout = fcLayout();
+  const focus = layout === 'focus';
   const modified = e.altKey || e.ctrlKey || e.metaKey;
   const view = canvas?.dataset.view;
+  if ((focus || layout === 'stacked') && !modified && !e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+   if (e.target.closest?.('input, select, textarea')) return;
+   e.preventDefault();
+   if (fc.drag || fc.rows.length < 2 || !list.clientHeight) return;
+   // One frame per wheel gesture. Let small trackpad deltas accumulate and ignore its inertial tail.
+   const direction = Math.sign(e.deltaY);
+   if (e.timeStamp - lastFrameWheel > 180 || Math.sign(frameWheelDelta) !== direction) {
+    frameWheelDelta = 0;
+    frameWheelDirection = 0;
+   }
+   lastFrameWheel = e.timeStamp;
+   frameWheelDelta += e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? list.clientHeight : 1);
+   if (frameWheelDirection === direction || Math.abs(frameWheelDelta) < 45) return;
+   frameWheelDirection = direction;
+   if (focus) {
+    void stepFocus(direction);
+    return;
+   }
+   const index = Math.round(list.scrollTop / list.clientHeight);
+   list.scrollTop = clamp(index + direction, 0, fc.rows.length - 1) * list.clientHeight;
+   return;
+  }
   const rowEl = canvas?.closest('.cqt-fc-row');
   const row = rowEl && fcRowByFrame(Number(rowEl.dataset.frame));
-  if (!row || (!focus && !modified && !(view === '3d' && e.shiftKey)) || !e.deltaY) return;
+  if (!row || !(modified || (view === '3d' && e.shiftKey)) || !e.deltaY) return;
   e.preventDefault();
   if (fc.drag) return;
   const delta = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? canvas.clientHeight : 1);
   const factor = 1.2 ** clamp(-delta / 100, -2, 2);
   if (view === '3d') {
-   if (e.shiftKey || (focus && !modified)) {
+   if (e.shiftKey) {
     row.zoom3d = clamp((row.zoom3d ?? fc.cfg.zoom3d ?? 1) * factor, 0.4, 5);
     fcSchedule([row], '3d');
    } else {
@@ -10478,6 +11491,7 @@ function fcBindWindow(el) {
     fcCacheFrameCloud(fc.targetId, row.frame, row.base, pos);
     await captureFrameBoxes(row.frame);
     row.ground = undefined;
+    row.detailError = false;
    }
    fcRefreshAll();
   } else if (act === 'key') {
@@ -10494,8 +11508,11 @@ function fcBindWindow(el) {
   } else if (act === 'ground') {
    fc.focusFrame = row.frame;
    fc.lastClicked = row.frame;
+   setField('cqt-fc-ground-kind', 'cloud');
+   setField('cqt-fc-ground-scope', 'current');
+   syncGroundFitControls(true);
    fcSetToolbar(true);
-   $('cqt-fc-ground-controls').open = true;
+   fcSelectToolbarTab('ground');
    $('cqt-fc-ground-kind').focus();
   } else if (act === 'flat') {
    await fcFlattenRows(fcTargetsFor(row));
@@ -10528,27 +11545,35 @@ async function openFullControl(id) {
  fcSetToolbar(fc.cfg.toolbarPinned);
  fcApplyBounds();
  fcSyncControls();
- const target = Number.isInteger(id) ? id : resolveTargetId();
+ const target = Number.isInteger(id) ? id : (targetLocked ? resolveTargetId() : activeId() ?? resolveTargetId());
  refreshSnapshotList();
- if (Number.isInteger(target) && target !== fc.targetId) return fcLoadTrack(target);
+ if (Number.isInteger(target) && target !== fc.targetId) return fcLoadObject(target);
  if (Number.isInteger(fc.targetId)) {
   setField('cqt-fc-target', fc.targetId);
-  return fcReloadStates();
+  await fcReloadStates();
+  if (!safeData()) return fcHarvest(false);
+  return;
  }
  fcRenderList();
- return setStatus('Full Control: nhập Object ID rồi bấm "Nạp Track".', 'info');
+ return setStatus('Full Control: chọn cuboid hoặc nhập Object ID rồi bấm “Nạp object”.', 'info');
 }
 
 function closeFullControl() {
  if (!fc.el) return;
  fcShowLimits(false);
  if (fc.toolsOpen) void fcToggleTools();
+ if (groundShortcut?.fullControl) closeGroundShortcut();
  fc.open = false;
+ fc.loadRequest++;
  clearTimeout(fc.toolbarTimer);
+ clearTimeout(fc.detailTimer);
  fc.abort = true;
  fcCancelDrag();
+ trimFullSceneCache();
  fc.hover = null;
  fc.el.style.display = 'none';
+ clearFootGroundPreview();
+ refreshGroundScanRing();
  fcSyncLiveViewportOffset();
  dockLayout();
 }
@@ -10889,7 +11914,7 @@ async function dockTick(force = false) {
  try {
   const id = resolveTargetId();
   const frame = getFrame();
-  const positions = getPointCloudPositions(); // đọc cùng lúc với frame, trước khi await
+  const positions = loadedCloudFrame() === frame ? getPointCloudPositions() : null;
   const s = Number.isInteger(id) && Number.isInteger(frame) ? await getState(id, frame) : null;
   if (getFrame() !== frame) {
    dock.again = true; // frame đổi trong lúc đọc => đọc lại
@@ -10901,6 +11926,7 @@ async function dockTick(force = false) {
    dock.cloudFrame = frame;
   }
   const cloudReady = !!positions && dock.cloudFrame === frame;
+  const projectionCloud = cloudReady ? positions : null;
   if (!isCuboid(s)) {
    dock.row = null;
    dock.id = Number.isInteger(id) ? id : null;
@@ -10913,13 +11939,14 @@ async function dockTick(force = false) {
    return;
   }
   const sig = `${id}|${frame}|${s.points.join(',')}|${!!s.outside}|${isKey(s)}|${cloudReady}|${health.rev}`;
-  if (!force && sig === dock.sig) return;
+  if (!force && sig === dock.sig && projectionCloud === dock.row?.projectionCloud) return;
   dock.sig = sig;
   dock.id = id;
   dock.frame = frame;
   dock.row = {
    frame, key: isKey(s), outside: !!s.outside, base: [...s.points], draft: null, ground: undefined,
    cloud: cloudReady ? dockCrop(id, frame, s.points, positions) : (pointCropCache.get(cropKey(id, frame)) || null),
+   projectionCloud,
    label: labelName(s),
   };
   dockRender();
@@ -11114,7 +12141,7 @@ function itemCreate() {
  html += `
   <div class="cqt-item-actions">
    <button id="cqt-item-get-lwh" class="cqt-btn cqt-btn-secondary cqt-sm" title="Xác nhận lấy LWH hiện tại của object đang chọn nạp vào tool (${OPTION_KEY}C)">Chốt LWH <span class="cqt-kbd">${OPTION_KEY}C</span></button>
-   <button id="cqt-item-sync-track" class="cqt-btn cqt-btn-primary cqt-sm" title="Đồng bộ LWH cho mọi keyframe toàn track (${OPTION_KEY}S)">Đồng bộ <span class="cqt-kbd">${OPTION_KEY}S</span></button>
+   <button id="cqt-item-sync-track" class="cqt-btn cqt-btn-primary cqt-sm" title="Đồng bộ LWH cho mọi keyframe toàn track (${LWH_SYNC_SHORTCUT})">Đồng bộ <span class="cqt-kbd">${LWH_SYNC_SHORTCUT}</span></button>
   </div>
   <div class="cqt-item-hint">Enter: áp · ${OPTION_KEY}Enter: áp cả nhóm · kéo nhãn để chỉnh</div></div>`;
  el.innerHTML = html;
@@ -11859,7 +12886,7 @@ function populateHealthPop(rootEl, d, curFrame, curRec) {
    syncSec.innerHTML = `
     <div class="cqt-hp-sec-head">
      <span class="cqt-hp-sec-title"><span class="cqt-hp-dot red"></span>Chưa đồng bộ LWH (${unsyncCount}/${d.visFrames.length}F · Chuẩn: ${fmtLWH(d.stdLWH.l, d.stdLWH.w, d.stdLWH.h)})</span>
-     <button class="cqt-btn cqt-btn-primary cqt-sm" data-act="sync-std" title="Đồng bộ toàn bộ keyframe về kích thước chuẩn ${fmtLWH(d.stdLWH.l, d.stdLWH.w, d.stdLWH.h)} (${OPTION_KEY}S)">Đồng bộ chuẩn</button>
+     <button class="cqt-btn cqt-btn-primary cqt-sm" data-act="sync-std" title="Đồng bộ toàn bộ keyframe về kích thước chuẩn ${fmtLWH(d.stdLWH.l, d.stdLWH.w, d.stdLWH.h)} (${LWH_SYNC_SHORTCUT})">Đồng bộ chuẩn</button>
     </div>
     <div class="cqt-hp-issue-list">${rowsHtml}${more}</div>
    `;
@@ -12066,13 +13093,14 @@ function installDockHandlers() {
 // Giao diện (shadcn/ui High-Contrast Dark & Light Architecture v3.9.0)
 // =========================================================================
 const STYLES = `
-#cvat-quicktool-wrapper, #cqt-fc-window, #cqt-modal, #cqt-qc-workspace, #cqt-hud, #cqt-toast, .cqt-dock-view, #cqt-item-panel, #cqt-health-pill { --cqt-bg: #09090b; --cqt-bg-bar: #0f0f13; --cqt-bg-card: #141418; --cqt-bg-elev: #1c1c22; --cqt-bg-hover: #272730; --cqt-bg-input: #09090b; --cqt-bg-view: #0b0b0e; --cqt-border: #3f3f46; --cqt-border-btn: #52525b; --cqt-border-strong: #71717a; --cqt-border-subtle: #27272f; --cqt-text: #fafafa; --cqt-text-sec: #e4e4e7; --cqt-text-muted: #a1a1aa; --cqt-text-dim: #71717a; --cqt-pri-bg: #fafafa; --cqt-pri-fg: #09090b; --cqt-pri-hover: #e4e4e7; --cqt-pri-kbd-bg: rgba(9,9,11,0.12); --cqt-pri-kbd-bd: rgba(9,9,11,0.24); --cqt-row-sel: rgba(250,250,250,0.045); --cqt-shadow: -12px 12px 32px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,255,255,0.06); --cqt-fc-shadow: 0 24px 64px rgba(0,0,0,0.85), 0 0 0 1px rgba(255,255,255,0.08); }
+#cvat-quicktool-wrapper, #cqt-fc-window, #cqt-modal, #cqt-qc-workspace, #cqt-hud, #cqt-toast, #cqt-ground-shortcut, .cqt-dock-view, #cqt-item-panel, #cqt-health-pill { --cqt-bg: #09090b; --cqt-bg-bar: #0f0f13; --cqt-bg-card: #141418; --cqt-bg-elev: #1c1c22; --cqt-bg-hover: #272730; --cqt-bg-input: #09090b; --cqt-bg-view: #0b0b0e; --cqt-border: #3f3f46; --cqt-border-btn: #52525b; --cqt-border-strong: #71717a; --cqt-border-subtle: #27272f; --cqt-text: #fafafa; --cqt-text-sec: #e4e4e7; --cqt-text-muted: #a1a1aa; --cqt-text-dim: #71717a; --cqt-pri-bg: #fafafa; --cqt-pri-fg: #09090b; --cqt-pri-hover: #e4e4e7; --cqt-pri-kbd-bg: rgba(9,9,11,0.12); --cqt-pri-kbd-bd: rgba(9,9,11,0.24); --cqt-row-sel: rgba(250,250,250,0.045); --cqt-shadow: -12px 12px 32px rgba(0,0,0,0.75), 0 0 0 1px rgba(255,255,255,0.06); --cqt-fc-shadow: 0 24px 64px rgba(0,0,0,0.85), 0 0 0 1px rgba(255,255,255,0.08); }
 #cvat-cuboid-toolbox.cqt-theme-light #cvat-quicktool-wrapper,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-fc-window,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-modal,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-qc-workspace,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-hud,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-toast,
+#cvat-cuboid-toolbox.cqt-theme-light #cqt-ground-shortcut,
 #cvat-cuboid-toolbox.cqt-theme-light .cqt-dock-view,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-item-panel,
 #cvat-cuboid-toolbox.cqt-theme-light #cqt-health-pill { --cqt-bg: #ffffff; --cqt-bg-bar: #f4f4f5; --cqt-bg-card: #f8fafc; --cqt-bg-elev: #f1f5f9; --cqt-bg-hover: #e4e4e7; --cqt-bg-input: #ffffff; --cqt-bg-view: #f8fafc; --cqt-border: #d4d4d8; --cqt-border-btn: #a1a1aa; --cqt-border-strong: #52525b; --cqt-border-subtle: #e4e4e7; --cqt-text: #09090b; --cqt-text-sec: #18181b; --cqt-text-muted: #52525b; --cqt-text-dim: #71717a; --cqt-pri-bg: #18181b; --cqt-pri-fg: #ffffff; --cqt-pri-hover: #27272a; --cqt-pri-kbd-bg: rgba(255,255,255,0.16); --cqt-pri-kbd-bd: rgba(255,255,255,0.32); --cqt-row-sel: rgba(24,24,27,0.055); --cqt-shadow: -10px 10px 28px rgba(15,23,42,0.16), 0 0 0 1px rgba(15,23,42,0.08); --cqt-fc-shadow: 0 20px 54px rgba(15,23,42,0.22), 0 0 0 1px rgba(15,23,42,0.1); }
@@ -12628,7 +13656,7 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
 <div class="cqt-row" style="gap:4px;">
 <button id="cqt-btn-apply-frame" class="cqt-btn cqt-btn-secondary" title="Chỉ sửa LWH tại frame hiện tại">Frame này</button>
 <button id="cqt-btn-apply-lwh" class="cqt-btn cqt-btn-secondary" title="Áp dụng LWH cho dải Start–End">Dải Start–End</button>
-<button id="cqt-btn-sync-track" class="cqt-btn cqt-btn-primary" title="Đồng bộ LWH cho mọi keyframe toàn track (${OPTION_KEY}S)">Toàn track <span class="cqt-kbd">${OPTION_KEY}S</span></button>
+<button id="cqt-btn-sync-track" class="cqt-btn cqt-btn-primary" title="Đồng bộ LWH cho mọi keyframe toàn track (${LWH_SYNC_SHORTCUT})">Toàn track <span class="cqt-kbd">${LWH_SYNC_SHORTCUT}</span></button>
 </div>
 </div>
 <!-- Cụm 3: Sub-label (Thuộc tính) -->
@@ -12660,16 +13688,18 @@ ${HEALTH_ANCHOR_DETAILS_HTML}
 <div class="cqt-card">
 <span class="cqt-h">Fit Ground</span>
 <div class="cqt-row cqt-wrap cqt-ground-controls">
-${groundFitSelect('cqt-ground-kind', 'Nguồn và phạm vi', GROUND_FIT_CHOICES)}
-${groundFitSelect('cqt-ground-scope', 'Phạm vi dải', {
- current_to_end: 'Frame này → Hết dải', whole: 'Toàn dải Start–End', keyframes: 'Chỉ keyframe dải', current: 'Chỉ frame hiện tại',
-})}
+${groundFitSelect('cqt-ground-kind', 'Nguồn', GROUND_FIT_CHOICES)}
+${groundFitSelect('cqt-ground-scope', 'Phạm vi', groundScopeChoices(false))}
 ${groundFitSelect('cqt-ground-mode', 'Cách đặt', GROUND_FIT_MODES)}
 ${groundFitSelect('cqt-ground-direction', 'Hướng', GROUND_FIT_DIRECTIONS)}
-<button id="cqt-btn-ground-fit" class="cqt-btn cqt-btn-primary">Fit theo mốc</button>
+<button id="cqt-btn-ground-fit" class="cqt-btn cqt-btn-primary">Áp dụng Fit Ground</button>
+<button type="button" id="cqt-btn-ground-preview" class="cqt-btn cqt-btn-secondary">Xem trước</button>
+<button type="button" id="cqt-btn-ground-apply" class="cqt-btn cqt-btn-primary" hidden>Áp dụng</button>
 <button type="button" id="cqt-btn-ground-measure" class="cqt-btn cqt-btn-secondary" title="Đo theo nguồn và phạm vi đã chọn">Đo đáy</button>
 </div>
+${footGroundFields('cqt-ground-')}
 <p id="cqt-ground-origin-hint" class="cqt-hint" hidden>${LIDAR_ORIGIN_HINT}</p>
+<p id="cqt-ground-scene-hint" class="cqt-hint" hidden>Ước lượng một mặt phẳng đất từ toàn bộ cloud của từng frame.</p>
 <details id="cqt-ground-lidar-fields" class="cqt-disclosure" hidden>
 <summary>Bán kính và tâm lấy điểm quanh LiDAR</summary>
 <div class="cqt-row cqt-wrap">
@@ -12949,9 +13979,11 @@ ${lidarGroundFields()}
 <div class="cqt-keymap-grid">
 <kbd class="cqt-kbd">${OPTION_KEY}Q / T / V / W / N</kbd><span>Toolbox / Full Control / ô nhìn nhúng / QA/QC / Item</span>
 <kbd class="cqt-kbd">${OPTION_KEY}A / B / P / C</kbd><span>Dò track / đánh dấu Anchor / Smart Snap / chốt LWH</span>
-<kbd class="cqt-kbd">${OPTION_KEY}H / G</kbd><span>Fit theo mặt Point Cloud / gốc LiDAR. Thêm Shift để áp theo dải.</span>
+<kbd class="cqt-kbd">${OPTION_KEY}G → 1–5 → 1–5</kbd><span>Fit Ground · chọn nguồn rồi phạm vi. Enter áp dụng xem trước, Esc hủy.</span>
+<kbd class="cqt-kbd">${OPTION_KEY}H / Shift+H</kbd><span>Xem trước Fit Ground dưới chân ở frame hiện tại / theo dải.</span>
+<kbd class="cqt-kbd">1 / 2 / 3 · − / +</kbd><span>Trong Full Control: đổi bố cục · chỉnh cỡ điểm.</span>
 <kbd class="cqt-kbd">${OPTION_KEY}Y</kbd><span>Fit theo Anchor của từng frame trong dải</span>
-<kbd class="cqt-kbd">${OPTION_KEY}S / R / X / Z</kbd><span>Đồng bộ LWH / lật 180° / Outside tới hết / Undo</span>
+<kbd class="cqt-kbd">${LWH_SYNC_SHORTCUT} / R / X / Z</kbd><span>Đồng bộ LWH / lật 180° / Outside tới hết / Undo</span>
 <kbd class="cqt-kbd">${OPTION_KEY}Shift+B / P / S / R / X / Z</kbd><span>Bỏ Anchor / Snap và đo LWH / đồng bộ dải / nắn hướng / Outside frame / Redo</span>
 </div>
 <p class="cqt-hint">Phím dự phòng: bấm <b>${KEY_PREFIX.split(' → ')[0]}</b>, nhả ra, rồi bấm lệnh dưới đây trong 2,4 giây. Esc để huỷ.</p>
@@ -13198,6 +14230,7 @@ function bindPanel(wrapper) {
    }
   }
   dockLayout();
+  refreshGroundScanRing();
   return open;
  };
  const queueCollapse = () => {
@@ -13261,6 +14294,7 @@ function bindPanel(wrapper) {
    wrapper.querySelector("#cvat-quicktool-body").scrollTop = 0;
    const conflict = $('cqt-shortcut-conflict');
    if (conflict) conflict.hidden = !hasNativePrefix();
+   refreshGroundScanRing();
   });
  });
 
@@ -13398,9 +14432,13 @@ function bindActions(wrapper) {
  on("cqt-btn-check-ground", checkGround);
  on("cqt-btn-apply-ground", applyGroundFit);
  on("cqt-btn-ground-fit", () => runGroundFit(val('cqt-ground-kind')));
+ on('cqt-btn-ground-preview', () => previewFootGround(false));
+ on('cqt-btn-ground-apply', () => applyFootGroundPreview(false));
  on("cqt-ground-kind", () => syncGroundFitControls(false), 'change');
+ for (const field of ['scope', 'mode', 'direction']) on('cqt-ground-' + field, clearFootGroundPreview, 'change');
  syncGroundFitControls(false);
  bindLidarGroundFields(on);
+ bindFootGroundFields(on, 'cqt-ground-');
 
  // Tab 3: Track (Yaw, Keyframe, Re-interpolate, Outside, Shift)
  on("cqt-btn-quick-fix-heading", alignYawCurrentFrame);
@@ -13538,6 +14576,7 @@ const sync = guarded(async () => {
  if (xf.active && getFrame() !== xf.frame) cancelTransform();
  if (lastQA && !qaInFlight && !qcDirty && lastQA.history !== qaHistoryStamp()) invalidateQC();
  syncFrameLabel();
+ refreshGroundScanRing();
  syncActiveObjectQuiet();
  await dockTick();
  await autoAttrTick();
@@ -13550,6 +14589,7 @@ function dispose() {
   if (xf.active) cancelTransform();
   if (fc.open) closeFullControl();
  } finally {
+  clearGroundScanRing();
   scope.abort();
   unsubscribe?.();
   clearTimeout(storeSyncTimer);

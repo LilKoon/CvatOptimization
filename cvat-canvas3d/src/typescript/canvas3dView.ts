@@ -23,6 +23,9 @@ import { disposeScene } from './utils';
 export interface Canvas3dView {
     html(): ViewsDOM;
     getToolboxViews(): Readonly<Views>;
+    getLoadedFrame(): number | null;
+    setGroundScanRing(frame: number, points: readonly (readonly [number, number, number])[] | null): void;
+    clearGroundScanRing(): void;
     render(): void;
     keyControls(keys: KeyboardEvent): void;
     focusObjectByClientId(clientID: number, animate?: boolean): void;
@@ -131,6 +134,7 @@ export class Canvas3dViewImpl implements Canvas3dView, Listener {
         cuboid: CuboidModel;
     }>;
     private hoverNeedsUpdate: boolean;
+    private groundScanRing: THREE.LineLoop<THREE.BufferGeometry, THREE.LineBasicMaterial> | null = null;
 
     public focusObjectByClientId(clientID: number, animate: boolean = true): void {
         const cuboidModel = this.drawnObjects[clientID];
@@ -1644,6 +1648,7 @@ export class Canvas3dViewImpl implements Canvas3dView, Listener {
     }
 
     private clearScene(): void {
+        this.clearGroundScanRing();
         Object.entries(this.drawnObjects).forEach(([clientID, { cuboid }]) => {
             this.removeSceneChildren(cuboid, +clientID);
         });
@@ -2504,6 +2509,33 @@ export class Canvas3dViewImpl implements Canvas3dView, Listener {
 
     public getToolboxViews(): Readonly<Views> {
         return this.views;
+    }
+
+    public getLoadedFrame(): number | null {
+        const { imageID, isFrameUpdating, imageIsDeleted, image } = this.model.data;
+        return isFrameUpdating || imageIsDeleted || !image ? null : imageID;
+    }
+
+    public clearGroundScanRing(): void {
+        const ring = this.groundScanRing;
+        if (!ring) return;
+        ring.removeFromParent();
+        ring.geometry.dispose();
+        ring.material.dispose();
+        this.groundScanRing = null;
+    }
+
+    public setGroundScanRing(frame: number, points: readonly (readonly [number, number, number])[] | null): void {
+        this.clearGroundScanRing();
+        if (!points || this.getLoadedFrame() !== frame) return;
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(points.flat(), 3));
+        const ring = new THREE.LineLoop(geometry, new THREE.LineBasicMaterial({ color: 0x22d3ee, depthTest: false }));
+        ring.name = 'cvat-ground-scan-ring';
+        ring.renderOrder = 20;
+        ring.raycast = () => {};
+        this.views.perspective.scene.add(ring);
+        this.groundScanRing = ring;
     }
 
     public keyControls(key: any): void {

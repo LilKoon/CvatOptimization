@@ -314,21 +314,35 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
     justify-content: flex-start;
 }
 
-#cvat-cuboid-toolbox .cqt-fc-disclosure {
+#cvat-cuboid-toolbox #cqt-fc-object-summary {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+#cvat-cuboid-toolbox .cqt-foot-ground-radius {
+    width: 110px;
+}
+
+#cvat-cuboid-toolbox #cqt-ground-scan-overlay {
+    position: fixed;
+    z-index: 849;
+    pointer-events: none;
+}
+
+#cvat-cuboid-toolbox #cqt-fc-window.shape-object :is(
+    [data-fc-track-only], [data-act="key"], [data-act="out-toggle"], [data-act="fill"],
+    #cqt-fc-interp, #cqt-fc-key-on, .cqt-fc-oi-group
+) {
+    display: none;
+}
+
+#cvat-cuboid-toolbox .cqt-fc-tabs {
+    justify-content: flex-start;
+}
+
+#cvat-cuboid-toolbox .cqt-fc-tabs .cqt-tab {
     flex: none;
-    border-bottom: 1px solid var(--cqt-border);
-    background: var(--cqt-bg-bar);
-}
-
-#cvat-cuboid-toolbox .cqt-fc-disclosure > summary {
-    padding: 5px 12px;
-    color: var(--cqt-text-sec);
-    cursor: pointer;
-    font-weight: 600;
-}
-
-#cvat-cuboid-toolbox .cqt-fc-disclosure .cqt-fc-bar {
-    border-bottom: 0;
+    padding-inline: 12px;
 }
 
 #cvat-cuboid-toolbox .cqt-fc-focus-nav {
@@ -360,8 +374,11 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
 }
 
 #cvat-cuboid-toolbox .focus-layout .cqt-fc-row {
-    flex: 1 0 280px;
-    height: auto;
+    box-sizing: border-box;
+    flex: 0 0 100%;
+    min-height: 0;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
 }
 
 #cvat-cuboid-toolbox .stacked-layout .cqt-fc-cols {
@@ -373,41 +390,30 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
     gap: 6px;
 }
 
-#cvat-cuboid-toolbox .stacked-layout .cqt-fc-disclosure > summary {
-    padding-block: 4px;
+#cvat-cuboid-toolbox :is(.focus-layout, .stacked-layout) .cqt-fc-list {
+    overscroll-behavior: contain;
+    scroll-snap-type: y mandatory;
 }
 
-#cvat-cuboid-toolbox .stacked-layout .cqt-fc-list {
-    min-width: 0;
-    overscroll-behavior: contain;
-    container-type: size;
+#cvat-cuboid-toolbox .stacked-layout .cqt-fc-list { min-width: 0; }
+
+#cvat-cuboid-toolbox :is(.focus-layout, .stacked-layout) .cqt-fc-list.is-frame-dragging {
+    scroll-snap-type: none;
 }
 
 #cvat-cuboid-toolbox .stacked-layout .cqt-fc-row {
-    --fc-3d-height: clamp(144px, calc(var(--fc-row-h) * 1.45), 300px);
-    --fc-projection-height: clamp(108px, var(--fc-row-h), 200px);
+    box-sizing: border-box;
+    height: 100%;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    grid-template-rows: auto var(--fc-3d-height) var(--fc-projection-height) auto;
-    /* Reserve room for the frame controls and dimensions in the scroll pane. */
-    grid-template-rows:
-        auto
-        min(var(--fc-3d-height), max(112px, calc(55cqh - 48px)))
-        min(var(--fc-projection-height), max(92px, calc(45cqh - 40px)))
-        auto;
+    grid-template-rows: auto minmax(0, 3fr) minmax(0, 2fr) auto;
     grid-template-areas:
         'frame frame frame'
         'perspective perspective perspective'
         'top side front'
         'params params params';
-    height: auto;
     border-bottom: 3px solid var(--cqt-border);
-}
-
-#cvat-cuboid-toolbox .stacked-layout .cqt-fc-row:only-child {
-    box-sizing: border-box;
-    height: 100%;
-    min-height: min-content;
-    grid-template-rows: auto minmax(112px, 3fr) minmax(92px, 2fr) auto;
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
 }
 
 #cvat-cuboid-toolbox .stacked-layout [data-view-cell="3d"] {
@@ -637,6 +643,33 @@ body:has(#cvat-cuboid-toolbox) .cvat-grid-layout-common-setups {
 
 #cvat-cuboid-toolbox .cqt-ground-controls {
     align-items: end;
+}
+
+#cvat-cuboid-toolbox #cqt-ground-shortcut {
+    position: fixed;
+    z-index: 1000003;
+    inset: auto auto 24px 50%;
+    transform: translateX(-50%);
+    width: min(360px, calc(100vw - 24px));
+    box-sizing: border-box;
+    padding: 12px;
+    border: 1px solid var(--cqt-border);
+    border-radius: 8px;
+    background: var(--cqt-bg);
+    color: var(--cqt-text);
+    box-shadow: var(--cqt-shadow);
+}
+
+#cvat-cuboid-toolbox .cqt-ground-shortcut-options {
+    display: grid;
+    gap: 4px;
+    margin-block: 8px;
+}
+
+#cvat-cuboid-toolbox .cqt-ground-shortcut-options button {
+    justify-content: flex-start;
+    height: auto;
+    min-height: 28px;
 }
 
 #cvat-cuboid-toolbox .cqt-ground-controls .cqt-col {

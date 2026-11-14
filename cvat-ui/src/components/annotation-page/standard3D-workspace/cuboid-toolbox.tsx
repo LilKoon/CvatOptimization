@@ -3,6 +3,7 @@
 import './cuboid-toolbox.css';
 import { useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
+import { decodePointCloud } from 'cvat-canvas3d/src/typescript/point-cloud';
 
 import { activateObject, changeFrameAsync, fetchAnnotationsAsync } from 'actions/annotation-actions';
 import { getCVATStore } from 'cvat-store';
@@ -20,6 +21,7 @@ export default function CuboidToolbox(): null {
         return mountCuboidToolbox({
             job,
             store: getCVATStore(),
+            decodePointCloud,
             changeFrame: (frame: number) => dispatch(changeFrameAsync(frame)),
             refreshAnnotations: () => dispatch(fetchAnnotationsAsync()),
             selectObject: (id: number | null) => dispatch(activateObject(id, null, null)),
