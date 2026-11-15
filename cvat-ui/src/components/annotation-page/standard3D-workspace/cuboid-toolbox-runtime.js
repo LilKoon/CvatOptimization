@@ -235,7 +235,7 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '5.0.2';
+const VERSION = '5.0.3';
 const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
@@ -7643,7 +7643,7 @@ const TOOL_SHORTCUTS = [
  ['points-up', 'Tăng cỡ điểm', 'Alt+Equal', '', () => fcSetPointSize(fc.cfg.pointSize + 1, true), pointSizeShortcutAvailable],
  ['review-prev', 'Review · Vấn đề trước', '', '', () => workspaceIssueStep(-1)],
  ['review-next', 'Review · Vấn đề sau', '', '', () => workspaceIssueStep(1)],
- ['review-mark', 'Review · Đã duyệt frame', '', '', workspaceMarkReviewed],
+ ['review-mark', 'Review · Đã duyệt frame', '', '', () => workspaceSetReviewed(true)],
  ['review-defer', 'Review · Để sau', '', '', () => workspaceDisposition('deferred')],
  ['ref-pin', 'Tham chiếu · Ghim frame', '', '', workspacePin],
  ['ref-compare', 'Tham chiếu · So sánh', '', '', async () => {
@@ -8907,6 +8907,9 @@ async function fcLoadObject(id = readObjectId($('cqt-fc-target'))) {
  fc.objectType = list[0].state.objectType;
  clearFootGroundPreview();
  setField('cqt-fc-target', id);
+ if (workspaceReviews.size) {
+  for (const { state } of list) if (!state.outside) workspaceReviewFor(state);
+ }
  fc.allRows = list.map(({ frame, state }) => ({
   frame,
   key: state.objectType === 'track' && !!state.keyframe,
@@ -9055,6 +9058,7 @@ async function fcReloadStates() {
   row.key = s.objectType === 'track' && !!s.keyframe;
   row.outside = !!s.outside;
   row.label = labelName(s) || row.label;
+  if (workspaceReviews.size && !row.outside) workspaceReviewFor(s);
   await captureFrameBoxes(row.frame);
  }
  fcComputeExtent();
@@ -10265,10 +10269,12 @@ function fcUpdateRowMeta(row) {
  el.classList.toggle('outside', !!row.outside);
  el.classList.toggle('current', row.frame === getFrame());
  const review = el.querySelector('[data-role="review"]');
- const state = workspaceReviewStatusCache.get(`${fc.targetId}:${row.frame}`);
+ const state = row.outside ? null : workspaceReviewStatusCache.get(`${fc.targetId}:${row.frame}`);
  if (review) {
   review.textContent = state === 'Đã duyệt' ? '✓' : state === 'Cần duyệt lại' ? '!' : '';
   review.title = state || '';
+  review.classList.toggle('is-reviewed', state === 'Đã duyệt');
+  review.classList.toggle('is-stale', state === 'Cần duyệt lại');
   review.hidden = !review.textContent;
  }
  const kf = el.querySelector('[data-role="kf"]');
@@ -10357,6 +10363,7 @@ function fcUpdateFocusNav() {
  $('cqt-fc-focus-next').disabled = position < 0 || position >= fc.filteredRows.length - 1;
  if (footGroundPreview?.fullControl && footGroundPreview.key !== footGroundSelectionKey(true)) clearFootGroundPreview();
  refreshGroundScanRing();
+ if ($('cqt-fc-review-state')?.getClientRects().length) workspaceQueueReviewStatus();
 }
 
 function fcUpdateBars() {
@@ -10432,6 +10439,11 @@ function fcUpdateBars() {
  }
  const sel = $('cqt-fc-selcount');
  if (sel) sel.textContent = String(fc.selected.size);
+ const selectVisible = $('cqt-fc-select-visible');
+ const visibleSelected = fc.filteredRows.filter((row) => fc.selected.has(row.frame)).length;
+ selectVisible.disabled = layout !== 'table' || isShape || !fc.filteredRows.length;
+ selectVisible.checked = !!visibleSelected && visibleSelected === fc.filteredRows.length;
+ selectVisible.indeterminate = !!visibleSelected && !selectVisible.checked;
  const show3d = fcShows3D();
  const btn3d = $('cqt-fc-toggle-3d');
  if (btn3d) {
@@ -10510,6 +10522,11 @@ function fcSyncLiveViewportOffset() {
   cam.__cqtViewOffsetActive = false;
  }
  try { pv.renderer?.render(pv.scene, cam); } catch (e) {}
+}
+
+function fcSelectVisible() {
+ fc.selected = new Set(fc.filteredRows.map((row) => row.frame));
+ fcUpdateSelectionUI();
 }
 
 function fcUpdateSelectionUI() {
@@ -11167,7 +11184,8 @@ function fullControlHTML() { return `
   `<section id="cqt-fc-${name}-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-${name}"${name === 'object' ? '' : ' hidden'}>
    <div class="cqt-fc-bar"><button class="cqt-btn cqt-btn-secondary cqt-sm" type="button" data-workspace-inspector="${name}">Mở ${workspaceTabs[name]}</button>
    ${name === 'object' ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-pin-size">Chốt LWH</button>' : ''}
-   ${name === 'qa' ? `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-mark-review">Đánh dấu đã duyệt</button>
+   ${name === 'qa' ? `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-mark-review" disabled>Đánh dấu đã duyệt</button>
+    <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-unmark-review" disabled>Đánh dấu chưa duyệt</button>
     <span id="cqt-fc-review-state" class="cqt-label" role="status"></span>
     <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-next-issue">Vấn đề ›</button>` : ''}</div>
   </section>`).join('')}
@@ -11288,7 +11306,10 @@ function fullControlHTML() { return `
 
  <div class="cqt-fc-grid">
  <div class="cqt-fc-cols">
-  <div>Frame</div>
+  <div><label class="cqt-fc-select-visible" title="Chọn tất cả frame khớp bộ lọc hiện tại">
+   <input id="cqt-fc-select-visible" type="checkbox" data-fc-track-only aria-label="Chọn tất cả frame khớp bộ lọc hiện tại" />
+   <span>Frame</span><small data-fc-track-only>Chọn hết</small>
+  </label></div>
   <div>Top · nhìn từ trên (xoay Yaw ↑)</div>
   <div>Side · nhìn từ sườn phải (xoay Pitch →)</div>
   <div>Front · nhìn từ đầu xe (xoay Roll ↑)</div>
@@ -11570,7 +11591,8 @@ function fcBindWindow(el) {
  });
  on('cqt-fc-reference-toggle', () => fcSetReference($('cqt-fc-reference').hidden, true));
  on('cqt-fc-reference-close', () => fcSetReference(false, true));
- on('cqt-fc-mark-review', workspaceMarkReviewed);
+ on('cqt-fc-mark-review', () => workspaceSetReviewed(true));
+ on('cqt-fc-unmark-review', () => workspaceSetReviewed(false));
  on('cqt-fc-next-issue', () => workspaceIssueStep(1));
  on('cqt-fc-next-track-issue', async () => {
   const { id, frame } = workspaceContext();
@@ -11731,10 +11753,12 @@ function fcBindWindow(el) {
  on('cqt-fc-anchor', () => saveFcSettings({ anchor: val('cqt-fc-anchor') }), 'change');
 
  // Thao tác nhóm
- on('cqt-fc-sel-all', () => {
-  fc.selected = new Set(fc.filteredRows.map((r) => r.frame));
+ on('cqt-fc-sel-all', fcSelectVisible);
+ on('cqt-fc-select-visible', (e) => {
+  if (e.target.checked) return fcSelectVisible();
+  for (const row of fc.filteredRows) fc.selected.delete(row.frame);
   fcUpdateSelectionUI();
- });
+ }, 'change');
  on('cqt-fc-sel-none', () => {
   fc.selected.clear();
   fcUpdateSelectionUI();
@@ -14661,6 +14685,8 @@ let workspaceLastCompareFrame = null;
 const workspaceReviews = new Map();
 let workspaceRevision = 0;
 let workspaceReviewRequest = 0;
+let workspaceReviewTimer;
+let workspaceReviewBusy = false;
 let workspaceWasSaving = false;
 let workspaceIssueIndex = -1;
 let workspaceScanCancelled = false;
@@ -14695,12 +14721,16 @@ async function workspaceOpen(tab) {
  openToolboxTab(tab);
 }
 
-async function workspaceStates(multiple = false) {
+function workspaceReviewScope(multiple = false) {
  const { id, frame } = workspaceContext();
+ const selected = multiple && fc.open && fc.selected.size > 0;
+ return { id, frame, frames: selected ? fcSelectedRows().map((row) => row.frame) : [frame] };
+}
+
+async function workspaceStates({ id, frame, frames } = workspaceReviewScope()) {
  if (!Number.isInteger(id) || !Number.isInteger(frame)) return [];
- const selected = multiple && fc.open ? fcSelectedRows().map((row) => row.frame) : [];
  const result = [];
- for (const f of selected.length ? selected : [frame]) {
+ for (const f of frames) {
   const state = await getState(id, f, true);
   if (scope.signal.aborted || workspaceContext().id !== id || workspaceContext().frame !== frame) return [];
   if (isCuboid(state) && !state.outside) result.push(state);
@@ -14726,12 +14756,20 @@ function workspaceReviewFor(state) {
  return label;
 }
 
-async function workspaceReviewStatus(multiple) {
+function workspaceQueueReviewStatus() {
+ clearTimeout(workspaceReviewTimer);
+ workspaceReviewTimer = setTimeout(guarded(workspaceReviewStatus), 80);
+}
+
+async function workspaceReviewStatus() {
  const output = $('cqt-workspace-review-state');
  const badge = $('cqt-fc-review-state');
- if (!fc.open && !output?.getClientRects().length) return;
+ const panelVisible = !!output?.getClientRects().length;
+ const badgeVisible = !!badge?.getClientRects().length;
+ if (!fc.open && !panelVisible) return;
  const request = ++workspaceReviewRequest;
- const states = await workspaceStates(multiple ?? !!badge?.getClientRects().length);
+ const target = workspaceReviewScope(panelVisible || badgeVisible);
+ const states = await workspaceStates(target);
  if (scope.signal.aborted || request !== workspaceReviewRequest) return;
  const counts = new Map();
  for (const state of states) {
@@ -14742,23 +14780,58 @@ async function workspaceReviewStatus(multiple) {
   const row = fcRowByFrame(state.frame);
   if (row?.el && fc.targetId === state.clientID) fcUpdateRowMeta(row);
  }
- const label = states.length ? [...counts].map(([status, count]) => `${status} · ${count} F`).join(' / ') : 'Chọn cuboid để duyệt';
- if (output.textContent !== label) output.textContent = label;
- if (badge && badge.textContent !== label) badge.textContent = label;
+ const reviewed = counts.get('Đã duyệt') ?? 0;
+ const stale = counts.get('Cần duyệt lại') ?? 0;
+ const local = !safeData() && isChecked('cqt-review-local');
+ const label = !states.length ? 'Chọn frame có cuboid để duyệt' : states.length === 1
+  ? `F${states[0].frame} · ${counts.keys().next().value}`
+  : `${states.length} frame đã chọn · ${reviewed}/${states.length} đã duyệt${stale ? ` · ${stale} cần duyệt lại` : ''}`;
+ if (panelVisible && output.textContent !== label) output.textContent = label;
+ if (badgeVisible) {
+  const text = label + (states.length && !local ? ' · Trong phiên' : '');
+  if (badge.textContent !== text) badge.textContent = text;
+  $('cqt-fc-mark-review').disabled = workspaceReviewBusy || reviewed === states.length;
+  $('cqt-fc-unmark-review').disabled = workspaceReviewBusy || reviewed + stale === 0;
+ }
  const progress = $('cqt-review-local-status');
- if (progress) progress.textContent = !safeData() && isChecked('cqt-review-local')
-  ? 'Lưu metadata trên trình duyệt này' : 'Metadata trong phiên';
+ if (progress) progress.textContent = local ? 'Lưu metadata trên trình duyệt này' : 'Metadata trong phiên';
 }
 
-async function workspaceMarkReviewed() {
- const states = await workspaceStates(true);
- if (!states.length) return fail('Chọn frame có cuboid trước khi duyệt.');
- for (const state of states) {
-  workspaceReviews.set(workspaceIdentity(state), { fingerprint: annotationFingerprint(state), at: Date.now() });
+async function workspaceSetReviewed(reviewed) {
+ if (workspaceReviewBusy) return;
+ workspaceReviewBusy = true;
+ for (const id of ['cqt-fc-mark-review', 'cqt-fc-unmark-review']) {
+  const button = $(id);
+  if (button) button.disabled = true;
  }
- const persisted = await workspaceSaveReview();
- await workspaceReviewStatus(true);
- setStatus(`Đã ghi nhận duyệt #${states[0].clientID} · ${states.length} frame.${persisted === false ? ' · Lưu trong phiên.' : ''}`, persisted === false ? 'warn' : 'success');
+ try {
+  const states = await workspaceStates(workspaceReviewScope(true));
+  if (!states.length) return fail('Chọn frame có cuboid trước khi duyệt.');
+  let changed = 0;
+  for (const state of states) {
+   const key = workspaceIdentity(state);
+   if (reviewed) {
+    if (workspaceReviewFor(state) === 'Đã duyệt') continue;
+    workspaceReviews.set(key, { fingerprint: annotationFingerprint(state), at: Date.now() });
+   } else {
+    const removed = workspaceReviews.delete(key);
+    const removedPending = workspaceReviews.delete(`${state.objectType}:tmp-${state.clientID}:${state.frame}`);
+    if (!removed && !removedPending) continue;
+   }
+   changed++;
+   workspaceReviewFor(state);
+   if (fc.open && fc.targetId === state.clientID) {
+    const row = fcRowByFrame(state.frame);
+    if (row) fcUpdateRowMeta(row);
+   }
+  }
+  if (!changed) return;
+  const persisted = await workspaceSaveReview();
+  setStatus(`Đã đánh dấu ${reviewed ? 'đã duyệt' : 'chưa duyệt'} #${states[0].clientID} · ${changed} frame.${persisted === false ? ' · Lưu trong phiên.' : ''}`, persisted === false ? 'warn' : 'success');
+ } finally {
+  workspaceReviewBusy = false;
+  await workspaceReviewStatus();
+ }
 }
 
 const reviewStorageKey = () => `cqt-review-v1:${job.taskId}:${job.id}`;
@@ -15562,7 +15635,7 @@ function workspaceBind() {
  repairOptions();
  on('cqt-workspace-issue-list', workspaceRenderIssues, 'toggle');
  on('cqt-review-stop', () => { if (qaInFlight) workspaceScanCancelled = true; });
- on('cqt-workspace-reviewed', workspaceMarkReviewed);
+ on('cqt-workspace-reviewed', () => workspaceSetReviewed(true));
  on('cqt-workspace-history-open', () => {
   const history = $('cqt-workspace-history');
   history.hidden = !history.hidden;
@@ -16098,6 +16171,7 @@ function dispose() {
   scope.abort();
   unsubscribe?.();
   clearTimeout(storeSyncTimer);
+  clearTimeout(workspaceReviewTimer);
   clearTimeout(workspaceCompareTimer);
   clearInterval(interval);
   clearTimeout(toastTimer);
