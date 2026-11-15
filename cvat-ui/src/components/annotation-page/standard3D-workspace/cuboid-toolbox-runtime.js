@@ -235,7 +235,7 @@ export default function mountCuboidToolbox({
 // Cấu hình + localStorage
 // =========================================================================
 const LOG = '[CVAT-Toolbox]';
-const VERSION = '5.0.1';
+const VERSION = '5.0.2';
 const OBJECT_ID_ERROR = 'Object ID phải là số nguyên từ 1 trở lên.';
 const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
 const OPTION_KEY = IS_MAC ? '⌥' : 'Alt+';
@@ -10349,10 +10349,10 @@ function fcRefreshAll() {
 }
 
 function fcUpdateFocusNav() {
- workspaceUpdateTimeline();
  const position = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
- $('cqt-fc-focus-label').textContent = position >= 0
-  ? `F${fc.focusFrame} · ${position + 1}/${fc.filteredRows.length}` : '—';
+ const row = fc.filteredRows[position];
+ $('cqt-fc-focus-label').textContent = row
+  ? `F${row.frame} · ${position + 1}/${fc.filteredRows.length}${row.key ? ' · Key' : ''}` : '—';
  $('cqt-fc-focus-prev').disabled = position <= 0;
  $('cqt-fc-focus-next').disabled = position < 0 || position >= fc.filteredRows.length - 1;
  if (footGroundPreview?.fullControl && footGroundPreview.key !== footGroundSelectionKey(true)) clearFootGroundPreview();
@@ -10389,6 +10389,13 @@ function fcUpdateBars() {
  const layout = fcLayout();
  fc.el.classList.toggle('focus-layout', layout === 'focus');
  fc.el.classList.toggle('stacked-layout', layout === 'stacked');
+ const focusNav = $('cqt-fc-focus-nav');
+ const nextIssue = $('cqt-fc-next-track-issue');
+ focusNav.hidden = layout !== 'focus' || !fc.filteredRows.length;
+ nextIssue.hidden = layout !== 'table' || isShape || !fc.allRows.length;
+ nextIssue.disabled = !fc.filteredRows.some((row) => row.hasIssue);
+ nextIssue.title = nextIssue.disabled ? 'Không có lỗi LWH hoặc Limit trong bộ lọc này'
+  : 'Đến frame tiếp theo có lỗi LWH hoặc Limit trong bộ lọc này';
  const rowHeight = $('cqt-fc-rowh');
  rowHeight.disabled = layout === 'stacked';
  rowHeight.parentElement.title = rowHeight.disabled ? '3D lớn tự căn chiều cao theo vùng làm việc' : 'Chiều cao ưu tiên của khung trong mỗi frame';
@@ -11112,6 +11119,12 @@ function fullControlHTML() { return `
     <button type="button" data-fc-layout="stacked" aria-label="3D lớn" aria-pressed="false" data-shortcut-title="layout-stacked" data-shortcut-title-text="3D lớn · Cuộn để chuyển frame">3D<span> lớn</span></button>
    </div>
   </div>
+  <div id="cqt-fc-focus-nav" class="cqt-fc-head-nav" role="group" aria-label="Điều hướng frame" hidden>
+   <button type="button" id="cqt-fc-focus-prev" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" aria-label="Frame trước" title="Frame trước">‹</button>
+   <span id="cqt-fc-focus-label" class="cqt-label" aria-live="polite"></span>
+   <button type="button" id="cqt-fc-focus-next" class="cqt-btn cqt-btn-secondary cqt-sm cqt-icon-btn" aria-label="Frame sau" title="Frame sau">›</button>
+  </div>
+  <button type="button" id="cqt-fc-next-track-issue" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" aria-label="Lỗi tiếp theo" hidden>${ICONS.alert}<span>Lỗi tiếp theo</span></button>
   <div class="cqt-fc-head-actions">
    <button type="button" id="cqt-fc-reference-toggle" class="cqt-btn cqt-btn-secondary cqt-sm" aria-expanded="false" aria-controls="cqt-fc-reference" aria-label="Tham chiếu" title="Tham chiếu · Ghim và so sánh frame">${ICONS.pin}<span>Tham chiếu</span></button>
    <button id="cqt-fc-tools" class="cqt-btn cqt-btn-secondary cqt-sm" aria-pressed="false" aria-controls="cvat-quicktool-panel" aria-label="Công cụ Toolbox" title="Box, Ground, Track, QA và Cài đặt của Toolbox">${ICONS.cuboid}<span>Công cụ Toolbox</span></button>
@@ -11138,11 +11151,6 @@ function fullControlHTML() { return `
    <button data-fc-filter="range" title="Theo dải Start–End trên panel chính">Dải Start–End <span data-count="range">0</span></button>
    <button data-fc-filter="issue" title="Chỉ hiện các frame bị lệch LWH (đỏ) hoặc vượt Limit (cam)">Lỗi <span data-count="issue">0</span></button>
   </div>
-  <div class="cqt-fc-focus-nav" data-fc-track-only>
-   <button id="cqt-fc-focus-prev" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame trước">‹</button>
-   <span id="cqt-fc-focus-label" class="cqt-label" aria-live="polite"></span>
-   <button id="cqt-fc-focus-next" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame sau">›</button>
-  </div>
   <div id="cqt-fc-health-badges" class="cqt-hp-badges"></div>
   <div class="cqt-fc-toolbar-actions">
    <button id="cqt-fc-pick" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none" aria-label="Lấy object đang chọn" title="Nạp object đang chọn trên canvas hoặc trong danh sách Objects">${ICONS.crosshair}<span>Lấy đang chọn</span></button>
@@ -11159,7 +11167,9 @@ function fullControlHTML() { return `
   `<section id="cqt-fc-${name}-controls" role="tabpanel" aria-labelledby="cqt-fc-tab-${name}"${name === 'object' ? '' : ' hidden'}>
    <div class="cqt-fc-bar"><button class="cqt-btn cqt-btn-secondary cqt-sm" type="button" data-workspace-inspector="${name}">Mở ${workspaceTabs[name]}</button>
    ${name === 'object' ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-pin-size">Chốt LWH</button>' : ''}
-   ${name === 'qa' ? '<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-mark-review">Đã duyệt</button><button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-next-issue">Vấn đề ›</button>' : ''}</div>
+   ${name === 'qa' ? `<button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-mark-review">Đánh dấu đã duyệt</button>
+    <span id="cqt-fc-review-state" class="cqt-label" role="status"></span>
+    <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" id="cqt-fc-next-issue">Vấn đề ›</button>` : ''}</div>
   </section>`).join('')}
  <details id="cqt-fc-view-controls" class="cqt-disclosure">
  <summary>Tùy chọn khung nhìn</summary>
@@ -11287,20 +11297,10 @@ function fullControlHTML() { return `
  </div>
  <div class="cqt-fc-list" id="cqt-fc-list"></div>
  </div>
- <div id="cqt-fc-context" class="cqt-row cqt-fc-context">
-  <button type="button" id="cqt-fc-context-prev" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame trước">‹</button>
-  <span id="cqt-fc-context-frame" class="cqt-label"></span>
-  <input id="cqt-fc-context-slider" type="range" min="0" max="0" value="0" aria-label="Timeline object">
-  <button type="button" id="cqt-fc-context-next" class="cqt-btn cqt-btn-secondary cqt-sm" aria-label="Frame sau">›</button>
-  <span id="cqt-fc-context-scope" class="cqt-label"></span>
-  <span id="cqt-fc-review-state" class="cqt-label"></span>
-  <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-workspace-inspector="qa">Review</button>
-  <button type="button" class="cqt-btn cqt-btn-secondary cqt-sm" data-workspace-inspector="settings" aria-label="Cài đặt Toolbox">${ICONS.sliders}</button>
- </div>
  <div class="cqt-fc-footer">
   <div id="cqt-fc-status" class="cqt-fc-status">Sẵn sàng.</div>
   <span id="cqt-fc-save-state" class="cqt-label"></span>
-  <button type="button" id="cqt-fc-save" class="cqt-btn cqt-btn-secondary cqt-sm">Save CVAT</button>
+  <button type="button" id="cqt-fc-save" class="cqt-btn cqt-btn-secondary cqt-sm cqt-none">Save CVAT</button>
   <div id="cqt-fc-cloud-progress" hidden>
    <div class="cqt-fc-progress" title="Tiến trình nạp point cloud"><div id="cqt-fc-progress-bar"></div></div>
    <span id="cqt-fc-progress-text" class="cqt-label">0%</span>
@@ -11454,6 +11454,7 @@ function fcSelectToolbarTab(name, focus = false) {
   $(button.getAttribute('aria-controls')).hidden = !active;
   if (active && focus) button.focus({ preventScroll: true });
  }
+ if (name === 'qa') void guarded(workspaceReviewStatus)();
  fcRerenderVisible('3d');
  refreshGroundScanRing();
 }
@@ -11472,6 +11473,7 @@ function fcSetToolbar(open) {
  clearTimeout(fc.toolbarTimer);
  if (!open && toolbar.contains(document.activeElement)) toggle.focus({ preventScroll: true });
  toolbar.hidden = !open;
+ if (open && !$('cqt-fc-qa-controls').hidden) void guarded(workspaceReviewStatus)();
  toggle.setAttribute('aria-expanded', String(open));
  toggle.title = open ? 'Thu thanh công cụ' : 'Bấm để mở thanh công cụ';
  pin.setAttribute('aria-pressed', String(pinned));
@@ -11570,9 +11572,16 @@ function fcBindWindow(el) {
  on('cqt-fc-reference-close', () => fcSetReference(false, true));
  on('cqt-fc-mark-review', workspaceMarkReviewed);
  on('cqt-fc-next-issue', () => workspaceIssueStep(1));
- on('cqt-fc-context-prev', () => fcStepFocus(-1));
- on('cqt-fc-context-next', () => fcStepFocus(1));
- on('cqt-fc-context-slider', (e) => workspaceGo(fc.targetId, fc.filteredRows[e.target.valueAsNumber]?.frame), 'change');
+ on('cqt-fc-next-track-issue', async () => {
+  const { id, frame } = workspaceContext();
+  const issues = fc.filteredRows.filter((row) => row.hasIssue);
+  const next = issues.find((row) => row.frame > frame) ?? issues[0];
+  if (!next) return;
+  await workspaceGo(id, next.frame);
+  if (fc.open && fc.targetId === id && fc.focusFrame === next.frame) {
+   setStatus(`#${id} · F${next.frame} · ${[next.unsynced && 'Lệch LWH', next.limitViol.length && 'Vượt Limit'].filter(Boolean).join(' · ')}`);
+  }
+ });
  on('cqt-ground-roi-fc', () => workspaceGroundRegion(true));
  on('cqt-ground-clear-fc', () => workspaceSetRegion(null));
  el.querySelectorAll('[data-workspace-inspector]').forEach((button) =>
@@ -14717,11 +14726,12 @@ function workspaceReviewFor(state) {
  return label;
 }
 
-async function workspaceReviewStatus(multiple = false) {
+async function workspaceReviewStatus(multiple) {
  const output = $('cqt-workspace-review-state');
- if (!output?.getClientRects().length && !$('cqt-fc-review-state')?.getClientRects().length) return;
+ const badge = $('cqt-fc-review-state');
+ if (!fc.open && !output?.getClientRects().length) return;
  const request = ++workspaceReviewRequest;
- const states = await workspaceStates(multiple);
+ const states = await workspaceStates(multiple ?? !!badge?.getClientRects().length);
  if (scope.signal.aborted || request !== workspaceReviewRequest) return;
  const counts = new Map();
  for (const state of states) {
@@ -14733,9 +14743,8 @@ async function workspaceReviewStatus(multiple = false) {
   if (row?.el && fc.targetId === state.clientID) fcUpdateRowMeta(row);
  }
  const label = states.length ? [...counts].map(([status, count]) => `${status} · ${count} F`).join(' / ') : 'Chọn cuboid để duyệt';
- output.textContent = label;
- const badge = $('cqt-fc-review-state');
- if (badge) badge.textContent = states.length ? label : '';
+ if (output.textContent !== label) output.textContent = label;
+ if (badge && badge.textContent !== label) badge.textContent = label;
  const progress = $('cqt-review-local-status');
  if (progress) progress.textContent = !safeData() && isChecked('cqt-review-local')
   ? 'Lưu metadata trên trình duyệt này' : 'Metadata trong phiên';
@@ -15650,8 +15659,6 @@ function workspaceSync() {
    }
   }), 120);
  }
- const marker = $('cqt-fc-context');
- if (marker) $('cqt-fc-context-scope').textContent = fc.selected.size > 1 ? `${fc.selected.size} frame đã chọn` : '';
  if (workspaceLastPinTarget !== context.id) {
   workspaceCompareSelection = null;
   workspaceLastPinTarget = context.id;
@@ -15662,18 +15669,6 @@ function workspaceSync() {
  void guarded(workspaceReviewStatus)();
 }
 let workspaceLastPinTarget = null;
-
-function workspaceUpdateTimeline() {
- const slider = $('cqt-fc-context-slider');
- if (!slider) return;
- const index = fc.filteredRows.findIndex((row) => row.frame === fc.focusFrame);
- slider.max = Math.max(0, fc.filteredRows.length - 1);
- slider.value = Math.max(0, index);
- slider.disabled = fc.filteredRows.length <= 1;
- $('cqt-fc-context-prev').disabled = index <= 0;
- $('cqt-fc-context-next').disabled = index < 0 || index >= fc.filteredRows.length - 1;
- $('cqt-fc-context-frame').textContent = index < 0 ? '—' : `F${fc.focusFrame} · ${index + 1}/${fc.filteredRows.length}${fc.filteredRows[index].key ? ' · Key' : ''}`;
-}
 
 function bindPanel(wrapper) {
  const pinBtn = wrapper.querySelector("#cqt-btn-pin");
